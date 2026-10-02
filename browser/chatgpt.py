@@ -92,10 +92,19 @@ class ChatGPTBrowser:
     # ========================================================
     # STATE DETECTION
     # ========================================================
+    # ========================================================
+    # STATE DETECTION
+    # ========================================================
 
     def detect_page_state(self):
         """
         Detect obvious ChatGPT states.
+
+        Important:
+        We only inspect visible dialogs for now.
+        We do NOT scan the entire page body because
+        normal ChatGPT UI may contain words such as
+        "usage limit" even when the model is available.
 
         Returns:
             (state, information)
@@ -107,12 +116,13 @@ class ChatGPTBrowser:
             None
         """
 
-        dialogs = self.page.locator(
-            '[role="dialog"]:visible'
-        )
+        # --------------------------------------------------------
+        # Check visible dialogs only
+        # --------------------------------------------------------
+
+        dialogs = self.page.locator('[role="dialog"]:visible')
 
         for i in range(dialogs.count()):
-
             dialog = dialogs.nth(i)
 
             try:
@@ -125,66 +135,40 @@ class ChatGPTBrowser:
 
             lower = text.lower()
 
+            # ----------------------------------------------------
+            # Usage limit
+            # ----------------------------------------------------
+
             limit_keywords = [
                 "usage limit",
                 "reached your limit",
                 "limit reached",
-                "too many requests",
                 "message limit",
                 "rate limit",
+                "too many requests",
             ]
 
-            if any(
-                keyword in lower
-                for keyword in limit_keywords
-            ):
+            if any(keyword in lower for keyword in limit_keywords):
                 return "RATE_LIMITED", text
 
+            # ----------------------------------------------------
+            # Authentication
+            # ----------------------------------------------------
+
             auth_keywords = [
-                "sign in",
-                "log in",
-                "login",
                 "session expired",
+                "please sign in",
+                "please log in",
             ]
 
-            if any(
-                keyword in lower
-                for keyword in auth_keywords
-            ):
+            if any(keyword in lower for keyword in auth_keywords):
                 return "AUTH_REQUIRED", text
 
+            # ----------------------------------------------------
+            # Any other visible dialog
+            # ----------------------------------------------------
+
             return "USER_ACTION_REQUIRED", text
-
-        try:
-            body_text = self.page.locator(
-                "body"
-            ).inner_text().strip()
-        except Exception:
-            body_text = ""
-
-        lower_body = body_text.lower()
-
-        limit_keywords = [
-            "you've reached your limit",
-            "you have reached your limit",
-            "usage limit",
-            "message limit",
-            "rate limit",
-        ]
-
-        for keyword in limit_keywords:
-            if keyword in lower_body:
-                return "RATE_LIMITED", keyword
-
-        auth_keywords = [
-            "session expired",
-            "please log in",
-            "please sign in",
-        ]
-
-        for keyword in auth_keywords:
-            if keyword in lower_body:
-                return "AUTH_REQUIRED", keyword
 
         return None, None
 
@@ -220,9 +204,7 @@ class ChatGPTBrowser:
             ]:
                 return state, information
 
-            current_text = (
-                self.get_latest_assistant_text()
-            )
+            current_text = self.get_latest_assistant_text()
 
             if (
                 current_text
@@ -244,9 +226,7 @@ class ChatGPTBrowser:
 
             if time.time() - start_time >= 180:
 
-                state, information = (
-                    self.detect_page_state()
-                )
+                state, information = self.detect_page_state()
 
                 if state is not None:
                     return state, information
@@ -261,38 +241,134 @@ class ChatGPTBrowser:
 
     def send_prompt(self, prompt):
         """
-        Send a prompt and return the result.
+        Send a prompt to ChatGPT.
 
-        Returns:
-            (state, result)
+        The composer can temporarily become unavailable while
+        the ChatGPT UI is transitioning, so we actively wait
+        for it to become visible, enabled, and editable.
         """
 
-        ready, reason = (
-            self.check_textbox_ready()
-        )
-
-        if not ready:
+        if not isinstance(prompt, str):
             return (
-                "NOT_READY",
-                reason
+                "SEND_ERROR",
+                "Prompt must be a string."
+            )
+
+        prompt = prompt.strip()
+
+        if not prompt:
+            return (
+                "SEND_ERROR",
+                "Prompt cannot be empty."
             )
 
         previous_text = (
             self.get_latest_assistant_text()
         )
 
-        textbox = self.get_textbox()
+        # --------------------------------------------------------
+        # Try several times because the ChatGPT composer can
+        # temporarily become non-editable during UI transitions.
+        # --------------------------------------------------------
 
-        try:
-            textbox.fill(prompt)
-            textbox.press("Enter")
+        max_attempts = 5
 
-        except Exception as error:
-            return (
-                "SEND_ERROR",
-                str(error)
-            )
+        for attempt in range(1, max_attempts + 1):
 
-        return self.wait_for_response(
-            previous_text
+            deadline = time.time() + 30
+
+            while time.time() < deadline:
+
+                textbox = self.get_textbox()
+
+                try:
+                    if (
+                        textbox.count() > 0
+                        and textbox.is_visible()
+                        and textbox.is_enabled()
+                        and textbox.is_editable()
+                    ):
+                        break
+
+                except Exception:
+                    pass
+
+                time.sleep(0.5)
+
+            else:
+                if attempt == max_attempts:
+                    return (
+                        "NOT_READY",
+                        "ChatGPT composer did not become "
+                        "editable within the allowed time."
+                    )
+
+                time.sleep(1)
+
+                continue
+
+            # ----------------------------------------------------
+            # Composer is actionable now.
+            # ----------------------------------------------------
+
+            try:
+
+                textbox.scroll_into_view_if_needed(
+                    timeout=5000
+                )
+
+                textbox.click(
+                    timeout=5000
+                )
+
+                textbox.fill(
+                    prompt,
+                    timeout=15000
+                )
+
+                # ------------------------------------------------
+                # Verify that the text actually entered the
+                # composer.
+                # ------------------------------------------------
+
+                inserted_text = (
+                    textbox.inner_text().strip()
+                )
+
+                if inserted_text != prompt:
+                    raise RuntimeError(
+                        "Prompt was not completely inserted "
+                        "into the ChatGPT composer."
+                    )
+
+                # ------------------------------------------------
+                # Send
+                # ------------------------------------------------
+
+                textbox.press(
+                    "Enter",
+                    timeout=10000
+                )
+
+                return self.wait_for_response(
+                    previous_text
+                )
+
+            except Exception as error:
+
+                # If this was the final attempt, report it.
+                if attempt == max_attempts:
+
+                    return (
+                        "SEND_ERROR",
+                        "Could not send prompt after "
+                        f"{max_attempts} attempts: {error}"
+                    )
+
+                # Give the UI a moment to settle before retrying.
+                time.sleep(1)
+
+        return (
+            "SEND_ERROR",
+            "Unexpected send failure."
         )
