@@ -13,7 +13,11 @@ from terminal.ui import (
     print_send_error,
     print_unknown_state,
     wait_for_user,
+    print_memory,
 )
+
+from memory.manager import MemoryManager
+
 
 
 def main():
@@ -40,6 +44,7 @@ def main():
             print(error)
             return
 
+        memory = MemoryManager()
         print("ChatGPT found!")
 
         # -----------------------------------------------
@@ -48,7 +53,7 @@ def main():
 
         print_header()
 
-        
+
         # -----------------------------------------------
         # Interactive loop
         # -----------------------------------------------
@@ -59,6 +64,10 @@ def main():
 
             # Ignore empty input
             if not prompt:
+                continue
+
+            if prompt.lower() == "/memory":
+                print_memory(memory.read_all())
                 continue
 
             # Exit
