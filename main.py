@@ -1,15 +1,12 @@
 from playwright.sync_api import sync_playwright
 
 with sync_playwright() as p:
-    print("Connecting to existing Chrome...")
+    print("Connecting to Chrome...")
 
     browser = p.chromium.connect_over_cdp(
         "http://127.0.0.1:9222"
     )
 
-    print("Connected!")
-
-    # Find the ChatGPT tab
     chat_page = None
 
     for context in browser.contexts:
@@ -22,24 +19,19 @@ with sync_playwright() as p:
         print("ChatGPT page not found.")
         raise SystemExit
 
-    print("ChatGPT found!")
+    print("ChatGPT found!\n")
 
-    # Find the message textbox
-    textbox = chat_page.get_by_role(
-        "textbox",
-        name="Chat with ChatGPT"
-    )
+    # Look for ChatGPT message elements
+    messages = chat_page.locator("[data-message-author-role]")
 
-    print("Textbox count:", textbox.count())
+    print("Messages found:", messages.count())
 
-    # Test message
-    message = "Hello from my terminal!"
+    for i in range(messages.count()):
+        message = messages.nth(i)
 
-    print("Sending:", message)
+        role = message.get_attribute("data-message-author-role")
 
-    textbox.fill(message)
-    textbox.press("Enter")
-
-    print("Message sent!")
+        print(f"\n--- Message {i} | {role} ---")
+        print(message.inner_text())
 
     input("\nPress ENTER to finish...")
