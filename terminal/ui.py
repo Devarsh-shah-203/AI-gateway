@@ -1,9 +1,11 @@
-def print_header():
+def print_header(memory_mode="OFF"):
     print("\n==============================")
     print("        AI Gateway")
     print("==============================")
-    print("Type /exit to quit.\n")
-
+    print(f"Memory: {memory_mode}")
+    print("Type /exit to quit.")
+    print("Type /memory to view project memory.")
+    print("Type /memory use|on|off to control memory.\n")
 
 def print_response(response):
     print("==============================")
@@ -65,3 +67,40 @@ def print_unknown_state():
 
 def wait_for_user(message):
     input(f"\n{message}")
+
+def print_memory(memory):
+    """
+    Display project memory in the terminal.
+
+    memory:
+        dict[str, str]
+    """
+
+    print("\n================================")
+    print("        PROJECT MEMORY")
+    print("================================\n")
+
+    for name, content in memory.items():
+
+        title = name.replace("_", " ").upper()
+
+        print("--------------------------------")
+        print(title)
+        print("--------------------------------")
+
+        if content.strip():
+            print(content.strip())
+        else:
+            print("[EMPTY]")
+
+        print()
+
+def print_memory_status(status):
+    """
+    Display current memory-context state.
+    """
+
+    print(
+        f"Memory: {status['mode']} "
+        f"| Snapshot: {status['snapshot']}"
+    )
