@@ -1,3 +1,20 @@
-browser-profile/
+# Virtual environment
 .venv/
+
+# Python
 __pycache__/
+*.py[cod]
+
+# Browser profile / authentication state
+chrome-data/
+
+# Environment variables
+.env
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
