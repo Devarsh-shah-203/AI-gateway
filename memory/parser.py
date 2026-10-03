@@ -38,7 +38,8 @@ class MemoryParser:
         Returns:
             list[dict]
 
-        Returns [] if no memory block exists.
+        Returns [] only when no AI_MEMORY block exists
+        or when updates is explicitly an empty list.
         """
 
         if not isinstance(response, str):
@@ -49,15 +50,50 @@ class MemoryParser:
         start = response.find(MEMORY_START)
         end = response.find(MEMORY_END)
 
+        # ----------------------------------------------------
         # No memory block
-        if start == -1 or end == -1:
+        # ----------------------------------------------------
+
+        if start == -1 and end == -1:
             return []
 
+        # One tag exists without the other
+        if start == -1 or end == -1:
+            raise ValueError(
+                "Incomplete AI_MEMORY block."
+            )
+
+        # ----------------------------------------------------
         # Make sure the closing tag comes after opening tag
+        # ----------------------------------------------------
+
         if end <= start:
             raise ValueError(
                 "Invalid AI_MEMORY block."
             )
+
+        # ----------------------------------------------------
+        # Reject multiple memory blocks
+        # ----------------------------------------------------
+
+        second_start = response.find(
+            MEMORY_START,
+            start + len(MEMORY_START)
+        )
+
+        second_end = response.find(
+            MEMORY_END,
+            end + len(MEMORY_END)
+        )
+
+        if second_start != -1 or second_end != -1:
+            raise ValueError(
+                "Multiple AI_MEMORY blocks are not allowed."
+            )
+
+        # ----------------------------------------------------
+        # Extract JSON
+        # ----------------------------------------------------
 
         json_start = start + len(MEMORY_START)
 
@@ -91,11 +127,15 @@ class MemoryParser:
                 "AI_MEMORY must contain a JSON object."
             )
 
-        updates = data.get("updates")
+        # "updates" must exist
+        if "updates" not in data:
+            raise ValueError(
+                "AI_MEMORY must contain an 'updates' field."
+            )
 
-        if updates is None:
-            return []
+        updates = data["updates"]
 
+        # "updates" must be a list
         if not isinstance(updates, list):
             raise ValueError(
                 "'updates' must be a list."
@@ -117,13 +157,19 @@ class MemoryParser:
             file_name = update.get("file")
             content = update.get("content")
 
+            # ------------------------------------------------
             # File validation
+            # ------------------------------------------------
+
             if file_name not in self.ALLOWED_FILES:
                 raise ValueError(
                     f"Invalid memory file: {file_name}"
                 )
 
+            # ------------------------------------------------
             # Content validation
+            # ------------------------------------------------
+
             if not isinstance(content, str):
                 raise ValueError(
                     "Memory content must be a string."
