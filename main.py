@@ -4,6 +4,7 @@ from browser.connection import connect_to_chrome
 from browser.chatgpt import ChatGPTBrowser
 from context.builder import ContextBuilder
 from context.session import MemoryContextSession
+from files.context import FileContextBuilder
 from memory.manager import MemoryManager
 from memory.prompts import build_save_prompt
 from memory.saver import MemorySaver
@@ -142,7 +143,13 @@ def main():
         # --------------------------------------------------
 
         memory = MemoryManager()
+
+        workspace = WorkspaceManager()
+
         context_builder = ContextBuilder()
+        file_context_builder = FileContextBuilder(workspace)
+
+       
 
         # OFF  -> no memory injection
         # ON   -> include memory once, then snapshot is loaded
@@ -192,7 +199,7 @@ def main():
             # --------------------------------------------------
             # WORKSPACE
             # --------------------------------------------------
-            workspace = WorkspaceManager()
+           
 
             if command == "/workspace":
 
@@ -473,9 +480,12 @@ def main():
             # --------------------------------------------------
 
             try:
+                file_context = file_context_builder.build(prompt)
+
                 final_prompt = context_builder.build(
                     prompt,
-                    include_memory=include_memory
+                    include_memory=include_memory,
+                    file_context=file_context
                 )
 
             except Exception as error:
