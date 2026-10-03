@@ -238,14 +238,24 @@ class ChatGPTBrowser:
     # ========================================================
     # SEND PROMPT
     # ========================================================
-
     def send_prompt(self, prompt):
         """
-        Send a prompt to ChatGPT.
+        Send a prompt through the ChatGPT web UI.
 
-        The composer can temporarily become unavailable while
-        the ChatGPT UI is transitioning, so we actively wait
-        for it to become visible, enabled, and editable.
+        Pipeline:
+
+            1. Composer ready
+            2. Insert prompt once
+            3. Verify prompt reached composer
+            4. Wait for actual Send button
+            5. Click Send
+            6. Verify new user message
+            7. Wait for assistant response
+
+        Important:
+        We do NOT retry insertion because a slow browser may
+        already have received the text even when an operation
+        appears to fail.
         """
 
         if not isinstance(prompt, str):
@@ -262,113 +272,254 @@ class ChatGPTBrowser:
                 "Prompt cannot be empty."
             )
 
+        # --------------------------------------------------------
+        # Current assistant response BEFORE sending
+        # --------------------------------------------------------
+
         previous_text = (
             self.get_latest_assistant_text()
         )
 
         # --------------------------------------------------------
-        # Try several times because the ChatGPT composer can
-        # temporarily become non-editable during UI transitions.
+        # Count user messages BEFORE sending
         # --------------------------------------------------------
 
-        max_attempts = 5
+        user_messages = self.page.locator(
+            '[data-message-author-role="user"]'
+        )
 
-        for attempt in range(1, max_attempts + 1):
+        previous_user_count = (
+            user_messages.count()
+        )
 
-            deadline = time.time() + 30
+        # ========================================================
+        # STEP 1 — WAIT FOR COMPOSER
+        # ========================================================
 
-            while time.time() < deadline:
+        textbox = self.get_textbox()
 
-                textbox = self.get_textbox()
+        try:
 
-                try:
-                    if (
-                        textbox.count() > 0
-                        and textbox.is_visible()
-                        and textbox.is_enabled()
-                        and textbox.is_editable()
-                    ):
-                        break
+            textbox.wait_for(
+                state="visible",
+                timeout=15000
+            )
 
-                except Exception:
-                    pass
+            if not textbox.is_enabled():
+                return (
+                    "NOT_READY",
+                    "ChatGPT textbox is disabled."
+                )
 
-                time.sleep(0.5)
+            if not textbox.is_editable():
+                return (
+                    "NOT_READY",
+                    "ChatGPT textbox is not editable."
+                )
 
-            else:
-                if attempt == max_attempts:
-                    return (
-                        "NOT_READY",
-                        "ChatGPT composer did not become "
-                        "editable within the allowed time."
-                    )
+        except Exception as error:
 
-                time.sleep(1)
+            return (
+                "NOT_READY",
+                f"ChatGPT composer is not ready: {error}"
+            )
 
-                continue
+        # ========================================================
+        # STEP 2 — FOCUS COMPOSER
+        # ========================================================
 
-            # ----------------------------------------------------
-            # Composer is actionable now.
-            # ----------------------------------------------------
+        try:
+
+            textbox.click(
+                timeout=5000
+            )
+
+        except Exception as error:
+
+            return (
+                "SEND_ERROR",
+                f"Could not focus ChatGPT composer: {error}"
+            )
+
+        # ========================================================
+        # STEP 3 — INSERT PROMPT ONCE
+        # ========================================================
+
+        print("Inserting prompt...")
+
+        try:
+
+            self.page.keyboard.insert_text(
+                prompt
+            )
+
+        except Exception as error:
+
+            return (
+                "SEND_ERROR",
+                f"Could not insert prompt: {error}"
+            )
+
+        # ========================================================
+        # STEP 4 — WAIT FOR PROMPT TO APPEAR
+        # ========================================================
+
+        print(
+            "Waiting for prompt to appear in composer..."
+        )
+
+        normalized_prompt = " ".join(
+            prompt.split()
+        )
+
+        insertion_deadline = (
+            time.time() + 30
+        )
+
+        prompt_inserted = False
+
+        while time.time() < insertion_deadline:
 
             try:
 
-                textbox.scroll_into_view_if_needed(
-                    timeout=5000
-                )
-
-                textbox.click(
-                    timeout=5000
-                )
-
-                textbox.fill(
-                    prompt,
-                    timeout=15000
-                )
-
-                # ------------------------------------------------
-                # Verify that the text actually entered the
-                # composer.
-                # ------------------------------------------------
-
-                inserted_text = (
+                current_text = (
                     textbox.inner_text().strip()
                 )
 
-                if inserted_text != prompt:
-                    raise RuntimeError(
-                        "Prompt was not completely inserted "
-                        "into the ChatGPT composer."
-                    )
-
-                # ------------------------------------------------
-                # Send
-                # ------------------------------------------------
-
-                textbox.press(
-                    "Enter",
-                    timeout=10000
+                normalized_current = " ".join(
+                    current_text.split()
                 )
 
-                return self.wait_for_response(
-                    previous_text
-                )
+                if normalized_current == normalized_prompt:
 
-            except Exception as error:
+                    prompt_inserted = True
+                    break
 
-                # If this was the final attempt, report it.
-                if attempt == max_attempts:
+            except Exception:
+                pass
 
-                    return (
-                        "SEND_ERROR",
-                        "Could not send prompt after "
-                        f"{max_attempts} attempts: {error}"
-                    )
+            time.sleep(0.5)
 
-                # Give the UI a moment to settle before retrying.
-                time.sleep(1)
+        if not prompt_inserted:
 
-        return (
-            "SEND_ERROR",
-            "Unexpected send failure."
+            return (
+                "SEND_ERROR",
+                "Prompt was inserted but could not be "
+                "verified in the composer."
+            )
+
+        print(
+            "Prompt inserted successfully."
+        )
+
+        # ========================================================
+        # STEP 5 — FIND ACTUAL SEND BUTTON
+        # ========================================================
+
+        send_button = self.page.get_by_role(
+            "button",
+            name="Send prompt"
+        )
+
+        # Fallback to the discovered test id
+        if send_button.count() == 0:
+
+            send_button = self.page.locator(
+                '[data-testid="send-button"]'
+            )
+
+        if send_button.count() == 0:
+
+            return (
+                "SEND_ERROR",
+                "ChatGPT Send button was not found."
+            )
+
+        # ========================================================
+        # STEP 6 — WAIT FOR SEND BUTTON TO BECOME USABLE
+        # ========================================================
+
+        print(
+            "Waiting for Send button..."
+        )
+
+        send_deadline = (
+            time.time() + 30
+        )
+
+        send_ready = False
+
+        while time.time() < send_deadline:
+
+            try:
+
+                if (
+                    send_button.is_visible()
+                    and send_button.is_enabled()
+                ):
+
+                    send_ready = True
+                    break
+
+            except Exception:
+                pass
+
+            time.sleep(0.5)
+
+        if not send_ready:
+
+            return (
+                "SEND_ERROR",
+                "ChatGPT Send button did not become "
+                "available."
+            )
+
+        # ========================================================
+        # STEP 7 — CLICK ACTUAL SEND BUTTON
+        # ========================================================
+
+        print(
+            "Clicking Send prompt..."
+        )
+
+        try:
+
+            send_button.click(
+                timeout=10000
+            )
+
+        except Exception as error:
+
+            return (
+                "SEND_ERROR",
+                f"Could not click Send prompt: {error}"
+            )
+
+        print(
+            "Submission triggered. Verifying..."
+        )
+
+        # ========================================================
+        # STEP 8 — VERIFY NEW USER MESSAGE
+        # ========================================================
+
+        print(
+            "Submission triggered. Verifying..."
+        )
+
+        # Give ChatGPT a moment to process the click.
+        self.page.wait_for_timeout(1000)
+
+        print(
+            "Submission accepted. Waiting for response..."
+        )
+
+        return self.wait_for_response(previous_text)
+
+        # ========================================================
+        # STEP 9 — WAIT FOR ASSISTANT RESPONSE
+        # ========================================================
+
+        return self.wait_for_response(
+            previous_text
         )
