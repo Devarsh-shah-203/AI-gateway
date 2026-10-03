@@ -3,76 +3,164 @@ from playwright.sync_api import sync_playwright
 from browser.connection import connect_to_chrome
 from browser.chatgpt import ChatGPTBrowser
 from context.builder import ContextBuilder
+from context.session import MemoryContextSession
 from memory.manager import MemoryManager
 from memory.prompts import build_save_prompt
 from memory.saver import MemorySaver
-from context.session import MemoryContextSession
+from workspace.manager import WorkspaceManager
 from terminal.ui import (
-    print_header,
-    print_response,
-    print_not_ready,
-    print_user_action,
-    print_rate_limited,
     print_auth_required,
-    print_send_error,
-    print_unknown_state,
-    wait_for_user,
+    print_header,
     print_memory,
     print_memory_status,
+    print_not_ready,
+    print_rate_limited,
+    print_response,
+    print_send_error,
+    print_unknown_state,
+    print_user_action,
+    wait_for_user,
+    print_workspace,
 )
 
 
-def main():
+def print_activity(title):
+    """Show one clean status banner for an active request."""
+    print("\n" + "-" * 56)
+    print(f"  {title}")
+    print("-" * 56)
 
+
+def handle_interrupted_state(state, result):
+    """
+    Handle provider states that require user intervention.
+
+    Returns:
+        True  -> caller should continue the main loop.
+        False -> state needs no interruption handling.
+    """
+
+    if state == "NOT_READY":
+        print_not_ready(result)
+        wait_for_user(
+            "Fix the ChatGPT browser, then press ENTER..."
+        )
+        return True
+
+    if state == "SEND_ERROR":
+        print_send_error(result)
+        wait_for_user(
+            "Fix the browser and press ENTER..."
+        )
+        return True
+
+    if state == "RATE_LIMITED":
+        print_rate_limited(result)
+        wait_for_user(
+            "Press ENTER after checking ChatGPT..."
+        )
+        return True
+
+    if state == "AUTH_REQUIRED":
+        print_auth_required(result)
+        wait_for_user(
+            "Sign in using the browser, then press ENTER..."
+        )
+        return True
+
+    if state == "USER_ACTION_REQUIRED":
+        print_user_action(result)
+        wait_for_user(
+            "Complete the action in the browser, then press ENTER..."
+        )
+        return True
+
+    if state == "TIMEOUT_UNKNOWN":
+        print_unknown_state()
+        wait_for_user(
+            "Press ENTER to continue..."
+        )
+        return True
+
+    return False
+
+
+def save_memory_from_response(result, memory_saver):
+    """Validate and safely persist a completed /save response."""
+
+    try:
+        saved_files = memory_saver.save_from_response(result)
+
+    except ValueError as error:
+        print("\nMemory proposal was rejected.")
+        print(f"Reason: {error}")
+        return
+
+    except Exception as error:
+        print("\nCould not update project memory.")
+        print(f"Error: {error}")
+        return
+
+    if not saved_files:
+        print("\nNo new important information was identified.")
+        return
+
+    print("\nMemory updated successfully:")
+
+    for path in saved_files:
+        print(f"  + {path.name}")
+
+
+def main():
     with sync_playwright() as p:
 
-        # ====================================================
+        # --------------------------------------------------
         # CONNECT TO CHROME
-        # ====================================================
+        # --------------------------------------------------
 
-        print("Connecting to Chrome...")
+        print_activity("Connecting to Chrome")
 
         browser = connect_to_chrome(p)
 
-        print("Connected!")
+        print("  Connected.")
 
-        # ====================================================
+        # --------------------------------------------------
         # CHATGPT
-        # ====================================================
+        # --------------------------------------------------
 
         try:
             chatgpt = ChatGPTBrowser(browser)
 
         except RuntimeError as error:
-            print(error)
+            print(f"\n{error}")
             return
 
-        print("ChatGPT found!")
+        print("  ChatGPT found.")
 
-        # ====================================================
+        # --------------------------------------------------
         # MEMORY / CONTEXT
-        # ====================================================
+        # --------------------------------------------------
 
         memory = MemoryManager()
         context_builder = ContextBuilder()
 
-        # OFF  → don't include memory
-        # ON   → include memory
-        # NEXT → include memory once
+        # OFF  -> no memory injection
+        # ON   -> include memory once, then snapshot is loaded
+        # NEXT -> include memory in the next normal prompt only
         memory_session = MemoryContextSession()
         memory_saver = MemorySaver()
 
-        # ====================================================
+        # --------------------------------------------------
         # HEADER
-        # ====================================================
+        # --------------------------------------------------
 
         print_header(
             memory_session.get_status()
         )
 
-        # ====================================================
+        # --------------------------------------------------
         # INTERACTIVE LOOP
-        # ====================================================
+        # --------------------------------------------------
 
         while True:
 
@@ -81,41 +169,182 @@ def main():
             if not prompt:
                 continue
 
-            # =================================================
+            command = prompt.lower()
+
+            # --------------------------------------------------
             # EXIT
-            # =================================================
+            # --------------------------------------------------
 
-            if prompt.lower() == "/exit":
-
+            if command == "/exit":
                 print("\nGoodbye.")
-
                 break
 
-            # =================================================
+            # --------------------------------------------------
             # SHOW MEMORY
-            # =================================================
+            # --------------------------------------------------
 
-            if prompt.lower() == "/memory":
-
+            if command == "/memory":
                 print_memory(
                     memory.read_all()
                 )
+                continue
+
+            # --------------------------------------------------
+            # WORKSPACE
+            # --------------------------------------------------
+            workspace = WorkspaceManager()
+
+            if command == "/workspace":
+
+                print_workspace(
+                    workspace.get_status()
+                )
 
                 continue
 
-            # =================================================
-            # MEMORY USE
-            # =================================================
 
-            if prompt.lower() == "/memory use":
+            # --------------------------------------------------
+            # WORKSPACE ADD
+            # --------------------------------------------------
+
+            if command.startswith("/workspace add"):
+
+                raw_path = prompt[
+                    len("/workspace add"):
+                ].strip()
+
+                if not raw_path:
+
+                    print(
+                        "\nUsage:"
+                    )
+
+                    print(
+                        "  /workspace add <directory>"
+                    )
+
+                    continue
+
+                # Allow paths with spaces wrapped in quotes.
+                path = raw_path.strip('"')
+
+                try:
+
+                    entry = workspace.add_directory(
+                        path
+                    )
+
+                except (ValueError, TypeError) as error:
+
+                    print(
+                        "\nCould not add workspace directory."
+                    )
+
+                    print(
+                        f"Reason: {error}"
+                    )
+
+                    continue
+
+                print(
+                    "\nWorkspace directory added."
+                )
+
+                print(
+                    f"  [{entry['id']}] "
+                    f"{entry['path']}"
+                )
+
+                print()
+
+                continue
+            # --------------------------------------------------
+            # WORKSPACE REMOVE
+            # --------------------------------------------------
+
+            if command.startswith("/workspace remove"):
+
+                raw_id = prompt[
+                    len("/workspace remove"):
+                ].strip()
+
+                if not raw_id:
+                    print(
+                        "\nUsage:\n"
+                        "  /workspace remove <id>"
+                    )
+                    continue
+
+                if not raw_id.isdigit():
+                    print(
+                        "\nWorkspace ID must be a number."
+                    )
+                    continue
+
+                workspace_id = int(raw_id)
+
+                try:
+                    removed = workspace.remove_directory(
+                        workspace_id
+                    )
+
+                except (ValueError, TypeError) as error:
+                    print(
+                        "\nCould not remove workspace directory."
+                    )
+                    print(
+                        f"Reason: {error}"
+                    )
+                    continue
+
+                print(
+                    "\nWorkspace directory removed."
+                )
+                print(
+                    f"  [{removed['id']}] "
+                    f"{removed['path']}"
+                )
+                print()
+
+                continue
+
+            # --------------------------------------------------
+            # WORKSPACE CLEAR
+            # --------------------------------------------------
+
+            if command == "/workspace clear":
+
+                directories = workspace.list_directories()
+
+                if not directories:
+                    print(
+                        "\nNo workspace directories are configured."
+                    )
+                    continue
+
+                count = len(directories)
+
+                workspace.clear()
+
+                print(
+                    f"\nWorkspace cleared. "
+                    f"{count} director{'y' if count == 1 else 'ies'} removed."
+                )
+
+                continue
+
+            # --------------------------------------------------
+            # MEMORY USE
+            # --------------------------------------------------
+
+            if command == "/memory use":
 
                 memory_session.use_once()
 
-                print("\nMemory: NEXT")
-
+                print_activity("Memory mode: NEXT")
                 print(
-                    "Project memory will be included "
-                    "in the next prompt only."
+                    "  Project memory will be included "
+                    "in the next normal prompt only."
                 )
 
                 print_memory_status(
@@ -123,26 +352,23 @@ def main():
                 )
 
                 print()
-
                 continue
 
-            # =================================================
+            # --------------------------------------------------
             # MEMORY ON
-            # =================================================
+            # --------------------------------------------------
 
-            if prompt.lower() == "/memory on":
+            if command == "/memory on":
 
                 memory_session.enable()
 
-                print("\nMemory: ON")
-
+                print_activity("Memory mode: ON")
                 print(
-                    "The current project-memory snapshot "
-                    "will be included in the next prompt."
+                    "  The current project-memory snapshot "
+                    "will be included in the next normal prompt."
                 )
-
                 print(
-                    "It will not be resent with every prompt."
+                    "  It will not be resent with every prompt."
                 )
 
                 print_memory_status(
@@ -150,21 +376,19 @@ def main():
                 )
 
                 print()
-
                 continue
 
-            # =================================================
+            # --------------------------------------------------
             # MEMORY OFF
-            # =================================================
+            # --------------------------------------------------
 
-            if prompt.lower() == "/memory off":
+            if command == "/memory off":
 
                 memory_session.disable()
 
-                print("\nMemory: OFF")
-
+                print_activity("Memory mode: OFF")
                 print(
-                    "Future prompts will not receive "
+                    "  Future prompts will not receive "
                     "project memory."
                 )
 
@@ -173,22 +397,20 @@ def main():
                 )
 
                 print()
-
                 continue
 
-            # =================================================
+            # --------------------------------------------------
             # MEMORY REFRESH
-            # =================================================
+            # --------------------------------------------------
 
-            if prompt.lower() == "/memory refresh":
+            if command == "/memory refresh":
 
                 memory_session.refresh()
 
-                print("\nMemory refresh queued.")
-
+                print_activity("Memory refresh queued")
                 print(
-                    "The current project-memory snapshot "
-                    "will be included in the next prompt."
+                    "  The current project-memory snapshot "
+                    "will be included in the next normal prompt."
                 )
 
                 print_memory_status(
@@ -196,297 +418,118 @@ def main():
                 )
 
                 print()
-
                 continue
 
-            # =================================================
-            # SAVE — RESERVED FOR NEXT STEP
-            # =================================================
-            # =================================================
-            # SAVE
-            # =================================================
+            # --------------------------------------------------
+            # SAVE MEMORY
+            # --------------------------------------------------
 
-            if prompt.lower() == "/save":
+            if command == "/save":
 
-                print("\n==============================")
-                print("       SAVING MEMORY")
-                print("==============================\n")
-
-                print("Reviewing current conversation...")
+                print_activity("Saving project memory")
+                print("  Reviewing current conversation...")
 
                 save_prompt = build_save_prompt()
 
-                print("Sending save request to ChatGPT...\n")
+                print("  Sending memory review to ChatGPT...")
 
                 state, result = chatgpt.send_prompt(
                     save_prompt
                 )
 
-                if state == "NOT_READY":
-
-                    print_not_ready(result)
-
-                    wait_for_user(
-                        "Fix the ChatGPT browser, "
-                        "then press ENTER..."
-                    )
-
+                if handle_interrupted_state(
+                    state,
+                    result
+                ):
                     continue
 
-                if state == "SEND_ERROR":
-
-                    print_send_error(result)
-
-                    wait_for_user(
-                        "Fix the browser and "
-                        "press ENTER..."
-                    )
-
+                if state != "COMPLETED":
+                    print("\nMemory save did not complete.")
                     continue
 
-                if state == "RATE_LIMITED":
+                print("\n" + "-" * 56)
+                print("  ChatGPT memory review")
+                print("-" * 56)
+                print(result)
 
-                    print_rate_limited(result)
+                save_memory_from_response(
+                    result,
+                    memory_saver
+                )
 
-                    wait_for_user(
-                        "Press ENTER after checking ChatGPT..."
-                    )
+                print()
+                continue
 
-                    continue
-
-                if state == "AUTH_REQUIRED":
-
-                    print_auth_required(result)
-
-                    wait_for_user(
-                        "Sign in using the browser, "
-                        "then press ENTER..."
-                    )
-
-                    continue
-
-                if state == "USER_ACTION_REQUIRED":
-
-                    print_user_action(result)
-
-                    wait_for_user(
-                        "Complete the action in the browser, "
-                        "then press ENTER..."
-                    )
-
-                    continue
-
-                if state == "TIMEOUT_UNKNOWN":
-
-                    print_unknown_state()
-
-                    wait_for_user(
-                        "Press ENTER to continue..."
-                    )
-
-                    continue
-
-                if state == "COMPLETED":
-
-                    print("==============================")
-                    print("ChatGPT's memory review:")
-                    print("==============================\n")
-
-                    print(result)
-
-                    try:
-
-                        saved_files = (
-                            memory_saver.save_from_response(
-                                result
-                            )
-                        )
-
-                    except ValueError as error:
-
-                        print(
-                            "\nMemory proposal was rejected."
-                        )
-
-                        print(
-                            f"Reason: {error}"
-                        )
-
-                        continue
-
-                    except Exception as error:
-
-                        print(
-                            "\nCould not update project memory."
-                        )
-
-                        print(
-                            f"Error: {error}"
-                        )
-
-                        continue
-
-                    if not saved_files:
-
-                        print(
-                            "\nNo new important information "
-                            "was identified."
-                        )
-
-                    else:
-
-                        print(
-                            "\nMemory updated successfully:"
-                        )
-
-                        for path in saved_files:
-
-                            print(
-                                f"✓ {path.name}"
-                            )
-
-                    print()
-
-                    continue
-
-            # =================================================
-            # DETERMINE WHETHER MEMORY IS USED
-            # =================================================
+            # --------------------------------------------------
+            # DETERMINE MEMORY USAGE
+            # --------------------------------------------------
 
             include_memory = (
                 memory_session.should_include_memory()
             )
 
-            # =================================================
+            # --------------------------------------------------
             # BUILD MODEL PROMPT
-            # =================================================
+            # --------------------------------------------------
 
             try:
-
                 final_prompt = context_builder.build(
                     prompt,
                     include_memory=include_memory
                 )
 
             except Exception as error:
-
                 print("\nCould not build context.")
                 print(error)
-
                 continue
 
-            # =================================================
+            # --------------------------------------------------
             # SEND TO CHATGPT
-            # =================================================
+            # --------------------------------------------------
 
-            print("\nSending...")
+            print_activity(
+                "Sending request to ChatGPT"
+            )
+
+            if include_memory:
+                print("  Project memory snapshot: attached")
 
             state, result = chatgpt.send_prompt(
                 final_prompt
             )
 
-            # =================================================
+            # --------------------------------------------------
             # MARK MEMORY AS SENT
-            # =================================================
+            # --------------------------------------------------
 
             if (
                 include_memory
                 and state not in [
                     "NOT_READY",
-                    "SEND_ERROR"
+                    "SEND_ERROR",
                 ]
             ):
                 memory_session.mark_memory_sent()
 
-            # =================================================
-            # COMPLETED
-            # =================================================
+            # --------------------------------------------------
+            # RESPONSE / INTERRUPTION
+            # --------------------------------------------------
 
             if state == "COMPLETED":
-
                 print_response(result)
 
-            # =================================================
-            # USER ACTION
-            # =================================================
+            elif not handle_interrupted_state(
+                state,
+                result
+            ):
+                print("\nUnhandled ChatGPT state.")
 
-            elif state == "USER_ACTION_REQUIRED":
+            # --------------------------------------------------
+            # MEMORY STATUS
+            # --------------------------------------------------
 
-                print_user_action(result)
-
-                wait_for_user(
-                    "Complete the action in the browser, "
-                    "then press ENTER..."
-                )
-
-            # =================================================
-            # NOT READY
-            # =================================================
-
-            elif state == "NOT_READY":
-
-                print_not_ready(result)
-
-                wait_for_user(
-                    "Fix the ChatGPT browser, "
-                    "then press ENTER..."
-                )
-
-            # =================================================
-            # RATE LIMITED
-            # =================================================
-
-            elif state == "RATE_LIMITED":
-
-                print_rate_limited(result)
-
-                wait_for_user(
-                    "Press ENTER after checking ChatGPT..."
-                )
-
-            # =================================================
-            # AUTH REQUIRED
-            # =================================================
-
-            elif state == "AUTH_REQUIRED":
-
-                print_auth_required(result)
-
-                wait_for_user(
-                    "Sign in using the browser, "
-                    "then press ENTER..."
-                )
-
-            # =================================================
-            # SEND ERROR
-            # =================================================
-
-            elif state == "SEND_ERROR":
-
-                print_send_error(result)
-
-                wait_for_user(
-                    "Fix the browser and press ENTER..."
-                )
-
-            # =================================================
-            # UNKNOWN TIMEOUT
-            # =================================================
-
-            elif state == "TIMEOUT_UNKNOWN":
-
-                print_unknown_state()
-
-                wait_for_user(
-                    "Press ENTER to continue..."
-                )
-
-            # =================================================
-            # SHOW CURRENT MEMORY STATUS
-            # =================================================
-
-            print(
-                f"Memory: {memory_session.get_status()}"
+            print_memory_status(
+                memory_session.get_status()
             )
 
             print()
