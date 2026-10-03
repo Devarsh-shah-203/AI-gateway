@@ -214,11 +214,7 @@ def main():
 
                 print("Reviewing current conversation...")
 
-                current_memory = memory.read_all()
-
-                save_prompt = build_save_prompt(
-                    current_memory
-                )
+                save_prompt = build_save_prompt()
 
                 print("Sending save request to ChatGPT...\n")
 
