@@ -128,8 +128,7 @@ class ContextBuilder:
         # ----------------------------------------------------
 
         sections.append(
-            "USER REQUEST\n"
-            "============\n\n"
+           
             f"{prompt}"
         )
 
