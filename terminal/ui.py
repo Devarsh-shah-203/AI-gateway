@@ -158,3 +158,22 @@ def print_workspace(directories):
     )
 
     print("=" * 56)
+
+def ask_edit_approval(file_name, reason, diff):
+    print()
+    print("=" * 60)
+    print(f"PROPOSED EDIT: {file_name}")
+    print("=" * 60)
+
+    print()
+    print("Reason:")
+    print(reason)
+
+    print()
+    print("Changes:")
+    print(diff)
+
+    print()
+    answer = input("Apply this change? [y/N]: ").strip().lower()
+
+    return answer in {"y", "yes"}
