@@ -82,9 +82,30 @@ class ChatGPTBrowser:
             return ""
 
         try:
-            return messages.nth(
+            message = messages.nth(
                 messages.count() - 1
-            ).inner_text().strip()
+            )
+
+            return message.evaluate(
+                """
+                (element) => {
+                    const clone = element.cloneNode(true);
+
+                    clone.querySelectorAll("pre").forEach((pre) => {
+                        const code = pre.querySelector("code");
+
+                        if (code) {
+                            const text = code.textContent || "";
+                            pre.replaceWith(
+                                document.createTextNode("\\n" + text + "\\n")
+                            );
+                        }
+                    });
+
+                    return clone.innerText || "";
+                }
+                """
+            ).strip()
 
         except Exception:
             return ""
@@ -515,11 +536,12 @@ class ChatGPTBrowser:
         )
 
         return self.wait_for_response(previous_text)
+ 
+       
 
         # ========================================================
         # STEP 9 — WAIT FOR ASSISTANT RESPONSE
         # ========================================================
 
-        return self.wait_for_response(
-            previous_text
-        )
+       
+    
