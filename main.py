@@ -1,5 +1,6 @@
 from playwright.sync_api import sync_playwright
 
+from files.edit_workflow import EditWorkflow
 from browser.connection import connect_to_chrome
 from browser.chatgpt import ChatGPTBrowser
 from context.builder import ContextBuilder
@@ -7,6 +8,7 @@ from context.session import MemoryContextSession
 from files.context import FileContextBuilder
 from memory.manager import MemoryManager
 from memory.prompts import build_save_prompt
+from files.edit_prompt import build_edit_prompt
 from memory.saver import MemorySaver
 from workspace.manager import WorkspaceManager
 from terminal.ui import (
@@ -22,6 +24,7 @@ from terminal.ui import (
     print_user_action,
     wait_for_user,
     print_workspace,
+    ask_edit_approval,
 )
 
 
@@ -148,7 +151,10 @@ def main():
 
         context_builder = ContextBuilder()
         file_context_builder = FileContextBuilder(workspace)
-
+        edit_workflow = EditWorkflow(
+        workspace_manager=workspace,
+        approval_function=ask_edit_approval,
+)
        
 
         # OFF  -> no memory injection
@@ -156,6 +162,7 @@ def main():
         # NEXT -> include memory in the next normal prompt only
         memory_session = MemoryContextSession()
         memory_saver = MemorySaver()
+        edit_mode = False
 
         # --------------------------------------------------
         # HEADER
@@ -187,27 +194,49 @@ def main():
                 break
 
             # --------------------------------------------------
-            # SHOW MEMORY
+            # EDIT MODE
             # --------------------------------------------------
 
-            if command == "/memory":
-                print_memory(
-                    memory.read_all()
-                )
+            if command == "/edit":
+
+                if edit_mode:
+                    print("\nAlready in EDIT MODE.")
+                else:
+                    edit_mode = True
+                    print("\nEDIT MODE: ON")
+                    print("  Describe the changes you want to make.")
+                    print("  Use <workspace_id/relative/path> for files.")
+                    print("  Type /cancel to leave edit mode.")
+
                 continue
 
+
+            # --------------------------------------------------
+            # CANCEL EDIT MODE
+            # --------------------------------------------------
+
+            if command == "/cancel":
+
+                if edit_mode:
+                    edit_mode = False
+                    print("\nEDIT MODE: OFF")
+                else:
+                    print("\nNot currently in EDIT MODE.")
+
+                continue
+            
             # --------------------------------------------------
             # WORKSPACE
             # --------------------------------------------------
-           
-
+                                
+            
             if command == "/workspace":
-
+            
                 print_workspace(
                     workspace.get_status()
                 )
-
-                continue
+            
+                continue            
 
 
             # --------------------------------------------------
@@ -482,12 +511,17 @@ def main():
             try:
                 file_context = file_context_builder.build(prompt)
 
-                final_prompt = context_builder.build(
-                    prompt,
-                    include_memory=include_memory,
-                    file_context=file_context
-                )
-
+                if edit_mode:
+                    final_prompt = build_edit_prompt(
+                        prompt,
+                        file_context
+                    )
+                else:
+                    final_prompt = context_builder.build(
+                        prompt,
+                        include_memory=include_memory,
+                        file_context=file_context
+                    )
             except Exception as error:
                 print("\nCould not build context.")
                 print(error)
@@ -524,10 +558,18 @@ def main():
             # --------------------------------------------------
             # RESPONSE / INTERRUPTION
             # --------------------------------------------------
-
             if state == "COMPLETED":
-                print_response(result)
 
+                if edit_mode:
+                    try:
+                        edit_results = edit_workflow.run(result)
+
+                    except Exception as exc:
+                        print(f"\nEdit workflow error: {exc}")
+
+                else:
+                    print_response(result)
+                    
             elif not handle_interrupted_state(
                 state,
                 result
