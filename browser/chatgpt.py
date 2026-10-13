@@ -32,7 +32,7 @@ class ChatGPTBrowser:
     def get_textbox(self):
         return self.page.get_by_role(
             "textbox",
-            name="Chat with ChatGPT"
+            name="Ask ChatGPT"
         )
 
     def check_textbox_ready(self):
