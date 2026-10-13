@@ -1,3 +1,6 @@
+from pathlib import Path
+
+
 def print_header(memory_mode="OFF"):
     print()
     print("=" * 56)
@@ -17,7 +20,7 @@ def print_header(memory_mode="OFF"):
 def print_response(response):
     print()
     print("-" * 56)
-    print("  ChatGPT")
+    print("  MODEL RESPONSE")
     print("-" * 56)
     print(response)
     print()
@@ -26,7 +29,7 @@ def print_response(response):
 def print_not_ready(reason):
     print()
     print("-" * 56)
-    print("  CHATGPT IS NOT READY")
+    print("  CHAT INTERFACE IS NOT READY")
     print("-" * 56)
     print(reason)
 
@@ -34,7 +37,7 @@ def print_not_ready(reason):
 def print_user_action(message):
     print()
     print("-" * 56)
-    print("  CHATGPT NEEDS YOUR INPUT")
+    print("  MODEL NEEDS YOUR INPUT")
     print("-" * 56)
     print(message)
 
@@ -42,9 +45,9 @@ def print_user_action(message):
 def print_rate_limited(message):
     print()
     print("-" * 56)
-    print("  CHATGPT USAGE LIMIT")
+    print("  MODEL USAGE LIMIT")
     print("-" * 56)
-    print("ChatGPT appears to have reached a usage limit.")
+    print("The model appears to have reached a usage limit.")
     print("\nDetected information:")
     print(message)
 
@@ -54,7 +57,7 @@ def print_auth_required(message):
     print("-" * 56)
     print("  AUTHENTICATION REQUIRED")
     print("-" * 56)
-    print("The ChatGPT session may have expired.")
+    print("The browser-based model session may have expired.")
     print("\nDetected information:")
     print(message)
 
@@ -70,9 +73,9 @@ def print_send_error(message):
 def print_unknown_state():
     print()
     print("-" * 56)
-    print("  UNKNOWN CHATGPT STATE")
+    print("  UNKNOWN MODEL STATE")
     print("-" * 56)
-    print("ChatGPT did not produce a completed response.")
+    print("The model did not produce a completed response.")
     print("\nCheck the browser.")
 
 
@@ -87,11 +90,7 @@ def print_memory(memory):
     print("=" * 56)
 
     for name, content in memory.items():
-
-        title = name.replace(
-            "_",
-            " "
-        ).upper()
+        title = name.replace("_", " ").upper()
 
         print()
         print(f"[ {title} ]")
@@ -106,17 +105,11 @@ def print_memory(memory):
 
 
 def print_memory_status(status):
-    print(
-        f"Memory: {status['mode']} "
-        f"| Snapshot: {status['snapshot']}"
-    )
+    print(f"Memory: {status['mode']} | Snapshot: {status['snapshot']}")
 
-from pathlib import Path
+
 def print_workspace(directories):
-    """
-    Display the currently configured workspace directories.
-    """
-
+    """Display the currently configured workspace directories."""
     print()
     print("=" * 56)
     print("                 WORKSPACE")
@@ -135,29 +128,17 @@ def print_workspace(directories):
     print()
 
     for entry in directories:
-
         path = Path(entry["path"])
-
-        print(
-            f"  [{entry['id']}] {path.name}"
-        )
-
-        print(
-            f"      {path}"
-        )
-
-        print(
-            f"      Status: {entry['status']}"
-        )
-
+        print(f"  [{entry['id']}] {path.name}")
+        print(f"      {path}")
+        print(f"      Status: {entry['status']}")
         print()
 
-    print(
-        f"  {len(directories)} "
-        f"directory{'ies' if len(directories) != 1 else ''} configured"
-    )
-
+    count = len(directories)
+    label = "directory" if count == 1 else "directories"
+    print(f"  {count} {label} configured")
     print("=" * 56)
+
 
 def ask_edit_approval(file_name, reason, diff):
     print()
@@ -175,5 +156,4 @@ def ask_edit_approval(file_name, reason, diff):
 
     print()
     answer = input("Apply this change? [y/N]: ").strip().lower()
-
     return answer in {"y", "yes"}
