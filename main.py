@@ -145,6 +145,7 @@ def main():
         memory_session = MemoryContextSession()
         memory_saver = MemorySaver()
         edit_mode = False
+        edit_protocol_sent = False
 
         # --------------------------------------------------
         # HEADER
@@ -194,6 +195,7 @@ def main():
             if command == "/cancel":
                 if edit_mode:
                     edit_mode = False
+                    edit_protocol_sent = False
                     print("\nEDIT MODE: OFF")
                 else:
                     print("\nNot currently in EDIT MODE.")
@@ -417,7 +419,8 @@ def main():
             # --------------------------------------------------
 
             include_memory = (
-                memory_session.should_include_memory()
+                not edit_mode
+                and memory_session.should_include_memory()
             )
 
             # --------------------------------------------------
@@ -429,7 +432,8 @@ def main():
                 if edit_mode:
                     final_prompt = build_edit_prompt(
                         prompt,
-                        file_context
+                        file_context,
+                        include_instructions=not edit_protocol_sent,
                     )
                 else:
                     final_prompt = context_builder.build(
@@ -454,6 +458,8 @@ def main():
             state, result = chat.send_prompt(
                 final_prompt
             )
+            if edit_mode and state not in {"NOT_READY", "SEND_ERROR"}:
+                edit_protocol_sent = True
 
             # --------------------------------------------------
             # MARK MEMORY AS SENT
