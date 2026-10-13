@@ -1,8 +1,7 @@
 from playwright.sync_api import sync_playwright
-
 from files.edit_workflow import EditWorkflow
 from browser.connection import connect_to_chrome
-from browser.chatgpt import ChatGPTBrowser
+from browser.chat import BrowserChat
 from context.builder import ContextBuilder
 from context.session import MemoryContextSession
 from files.context import FileContextBuilder
@@ -38,16 +37,14 @@ def print_activity(title):
 def handle_interrupted_state(state, result):
     """
     Handle provider states that require user intervention.
-
     Returns:
         True  -> caller should continue the main loop.
         False -> state needs no interruption handling.
     """
-
     if state == "NOT_READY":
         print_not_ready(result)
         wait_for_user(
-            "Fix the ChatGPT browser, then press ENTER..."
+            "Fix the browser chat page, then press ENTER..."
         )
         return True
 
@@ -61,7 +58,7 @@ def handle_interrupted_state(state, result):
     if state == "RATE_LIMITED":
         print_rate_limited(result)
         wait_for_user(
-            "Press ENTER after checking ChatGPT..."
+            "Press ENTER after checking the model page..."
         )
         return True
 
@@ -85,32 +82,25 @@ def handle_interrupted_state(state, result):
             "Press ENTER to continue..."
         )
         return True
-
     return False
 
 
 def save_memory_from_response(result, memory_saver):
     """Validate and safely persist a completed /save response."""
-
     try:
         saved_files = memory_saver.save_from_response(result)
-
     except ValueError as error:
         print("\nMemory proposal was rejected.")
         print(f"Reason: {error}")
         return
-
     except Exception as error:
         print("\nCould not update project memory.")
         print(f"Error: {error}")
         return
-
     if not saved_files:
         print("\nNo new important information was identified.")
         return
-
     print("\nMemory updated successfully:")
-
     for path in saved_files:
         print(f"  + {path.name}")
 
@@ -123,40 +113,32 @@ def main():
         # --------------------------------------------------
 
         print_activity("Connecting to Chrome")
-
         browser = connect_to_chrome(p)
-
         print("  Connected.")
 
         # --------------------------------------------------
-        # CHATGPT
+        # BROWSER CHAT TRANSPORT
         # --------------------------------------------------
 
         try:
-            chatgpt = ChatGPTBrowser(browser)
-
+            chat = BrowserChat(browser)
         except RuntimeError as error:
             print(f"\n{error}")
             return
-
-        print("  ChatGPT found.")
+        print("  Chat interface found.")
 
         # --------------------------------------------------
         # MEMORY / CONTEXT
         # --------------------------------------------------
 
         memory = MemoryManager()
-
         workspace = WorkspaceManager()
-
         context_builder = ContextBuilder()
         file_context_builder = FileContextBuilder(workspace)
         edit_workflow = EditWorkflow(
         workspace_manager=workspace,
         approval_function=ask_edit_approval,
 )
-       
-
         # OFF  -> no memory injection
         # ON   -> include memory once, then snapshot is loaded
         # NEXT -> include memory in the next normal prompt only
@@ -177,12 +159,9 @@ def main():
         # --------------------------------------------------
 
         while True:
-
             prompt = input("> ").strip()
-
             if not prompt:
                 continue
-
             command = prompt.lower()
 
             # --------------------------------------------------
@@ -198,7 +177,6 @@ def main():
             # --------------------------------------------------
 
             if command == "/edit":
-
                 if edit_mode:
                     print("\nAlready in EDIT MODE.")
                 else:
@@ -207,123 +185,94 @@ def main():
                     print("  Describe the changes you want to make.")
                     print("  Use <workspace_id/relative/path> for files.")
                     print("  Type /cancel to leave edit mode.")
-
                 continue
-
 
             # --------------------------------------------------
             # CANCEL EDIT MODE
             # --------------------------------------------------
 
             if command == "/cancel":
-
                 if edit_mode:
                     edit_mode = False
                     print("\nEDIT MODE: OFF")
                 else:
                     print("\nNot currently in EDIT MODE.")
-
                 continue
-            
+
             # --------------------------------------------------
             # WORKSPACE
             # --------------------------------------------------
-                                
-            
+
             if command == "/workspace":
-            
                 print_workspace(
                     workspace.get_status()
                 )
-            
-                continue            
-
+                continue
 
             # --------------------------------------------------
             # WORKSPACE ADD
             # --------------------------------------------------
 
             if command.startswith("/workspace add"):
-
                 raw_path = prompt[
                     len("/workspace add"):
                 ].strip()
-
                 if not raw_path:
-
                     print(
                         "\nUsage:"
                     )
-
                     print(
                         "  /workspace add <directory>"
                     )
-
                     continue
-
                 # Allow paths with spaces wrapped in quotes.
                 path = raw_path.strip('"')
-
                 try:
-
                     entry = workspace.add_directory(
                         path
                     )
-
                 except (ValueError, TypeError) as error:
-
                     print(
                         "\nCould not add workspace directory."
                     )
-
                     print(
                         f"Reason: {error}"
                     )
-
                     continue
-
                 print(
                     "\nWorkspace directory added."
                 )
-
                 print(
                     f"  [{entry['id']}] "
                     f"{entry['path']}"
                 )
-
                 print()
-
                 continue
+
             # --------------------------------------------------
             # WORKSPACE REMOVE
             # --------------------------------------------------
 
             if command.startswith("/workspace remove"):
-
                 raw_id = prompt[
                     len("/workspace remove"):
                 ].strip()
-
                 if not raw_id:
                     print(
                         "\nUsage:\n"
                         "  /workspace remove <id>"
                     )
                     continue
-
                 if not raw_id.isdigit():
                     print(
                         "\nWorkspace ID must be a number."
                     )
                     continue
-
                 workspace_id = int(raw_id)
-
                 try:
                     removed = workspace.remove_directory(
                         workspace_id
                     )
-
                 except (ValueError, TypeError) as error:
                     print(
                         "\nCould not remove workspace directory."
@@ -332,7 +281,6 @@ def main():
                         f"Reason: {error}"
                     )
                     continue
-
                 print(
                     "\nWorkspace directory removed."
                 )
@@ -341,7 +289,6 @@ def main():
                     f"{removed['path']}"
                 )
                 print()
-
                 continue
 
             # --------------------------------------------------
@@ -349,24 +296,18 @@ def main():
             # --------------------------------------------------
 
             if command == "/workspace clear":
-
                 directories = workspace.list_directories()
-
                 if not directories:
                     print(
                         "\nNo workspace directories are configured."
                     )
                     continue
-
                 count = len(directories)
-
                 workspace.clear()
-
                 print(
                     f"\nWorkspace cleared. "
                     f"{count} director{'y' if count == 1 else 'ies'} removed."
                 )
-
                 continue
 
             # --------------------------------------------------
@@ -374,19 +315,15 @@ def main():
             # --------------------------------------------------
 
             if command == "/memory use":
-
                 memory_session.use_once()
-
                 print_activity("Memory mode: NEXT")
                 print(
                     "  Project memory will be included "
                     "in the next normal prompt only."
                 )
-
                 print_memory_status(
                     memory_session.get_status()
                 )
-
                 print()
                 continue
 
@@ -395,9 +332,7 @@ def main():
             # --------------------------------------------------
 
             if command == "/memory on":
-
                 memory_session.enable()
-
                 print_activity("Memory mode: ON")
                 print(
                     "  The current project-memory snapshot "
@@ -406,11 +341,9 @@ def main():
                 print(
                     "  It will not be resent with every prompt."
                 )
-
                 print_memory_status(
                     memory_session.get_status()
                 )
-
                 print()
                 continue
 
@@ -419,19 +352,15 @@ def main():
             # --------------------------------------------------
 
             if command == "/memory off":
-
                 memory_session.disable()
-
                 print_activity("Memory mode: OFF")
                 print(
                     "  Future prompts will not receive "
                     "project memory."
                 )
-
                 print_memory_status(
                     memory_session.get_status()
                 )
-
                 print()
                 continue
 
@@ -440,19 +369,15 @@ def main():
             # --------------------------------------------------
 
             if command == "/memory refresh":
-
                 memory_session.refresh()
-
                 print_activity("Memory refresh queued")
                 print(
                     "  The current project-memory snapshot "
                     "will be included in the next normal prompt."
                 )
-
                 print_memory_status(
                     memory_session.get_status()
                 )
-
                 print()
                 continue
 
@@ -461,38 +386,29 @@ def main():
             # --------------------------------------------------
 
             if command == "/save":
-
                 print_activity("Saving project memory")
                 print("  Reviewing current conversation...")
-
                 save_prompt = build_save_prompt()
-
-                print("  Sending memory review to ChatGPT...")
-
-                state, result = chatgpt.send_prompt(
+                print("  Sending memory review to model...")
+                state, result = chat.send_prompt(
                     save_prompt
                 )
-
                 if handle_interrupted_state(
                     state,
                     result
                 ):
                     continue
-
                 if state != "COMPLETED":
                     print("\nMemory save did not complete.")
                     continue
-
                 print("\n" + "-" * 56)
-                print("  ChatGPT memory review")
+                print("  Model memory review")
                 print("-" * 56)
                 print(result)
-
                 save_memory_from_response(
                     result,
                     memory_saver
                 )
-
                 print()
                 continue
 
@@ -510,7 +426,6 @@ def main():
 
             try:
                 file_context = file_context_builder.build(prompt)
-
                 if edit_mode:
                     final_prompt = build_edit_prompt(
                         prompt,
@@ -528,17 +443,15 @@ def main():
                 continue
 
             # --------------------------------------------------
-            # SEND TO CHATGPT
+            # SEND TO MODEL
             # --------------------------------------------------
 
             print_activity(
-                "Sending request to ChatGPT"
+                "Sending request to model"
             )
-
             if include_memory:
                 print("  Project memory snapshot: attached")
-
-            state, result = chatgpt.send_prompt(
+            state, result = chat.send_prompt(
                 final_prompt
             )
 
@@ -558,23 +471,20 @@ def main():
             # --------------------------------------------------
             # RESPONSE / INTERRUPTION
             # --------------------------------------------------
-            if state == "COMPLETED":
 
+            if state == "COMPLETED":
                 if edit_mode:
                     try:
                         edit_results = edit_workflow.run(result)
-
                     except Exception as exc:
                         print(f"\nEdit workflow error: {exc}")
-
                 else:
                     print_response(result)
-                    
             elif not handle_interrupted_state(
                 state,
                 result
             ):
-                print("\nUnhandled ChatGPT state.")
+                print("\nUnhandled model state.")
 
             # --------------------------------------------------
             # MEMORY STATUS
@@ -583,7 +493,6 @@ def main():
             print_memory_status(
                 memory_session.get_status()
             )
-
             print()
 
 
