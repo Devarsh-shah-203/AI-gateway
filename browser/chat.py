@@ -91,6 +91,7 @@ class BrowserChat:
         send_timeout: float = 30.0,
         submission_timeout: float = 12.0,
         response_timeout: float = 180.0,
+        image_generation_timeout: float = 600.0,
         response_stability: float = 2.5,
         poll_interval: float = 0.25,
     ) -> None:
@@ -100,9 +101,14 @@ class BrowserChat:
         self.send_timeout = send_timeout
         self.submission_timeout = submission_timeout
         self.response_timeout = response_timeout
+        # Image generation can take substantially longer than ordinary text
+        # responses. This timeout is used only when the outgoing prompt appears
+        # to explicitly request generated visual content.
+        self.image_generation_timeout = image_generation_timeout
         self.response_stability = response_stability
         self.poll_interval = poll_interval
         self._active_prompt: Optional[str] = None
+        self._active_image_generation = False
 
         self.page = page or self._find_chat_page()
         if self.page is None:
@@ -534,6 +540,215 @@ class BrowserChat:
         except Exception:
             return 0
 
+    @staticmethod
+    def _is_image_generation_request(prompt: str) -> bool:
+        """Return whether the request explicitly asks the model to create visuals.
+
+        This is intentionally a conservative heuristic: it affects timeout
+        selection and whether newly rendered response images are reported as
+        generated outputs, so ordinary web/article thumbnails should not trigger
+        it merely because the prompt contains the word "image".
+        """
+        text = (prompt or "").lower()
+        visual_nouns = (
+            r"image|picture|illustration|artwork|photo|photograph|graphic|"
+            r"logo|icon|wallpaper|poster|banner|thumbnail|visual|diagram|"
+            r"drawing|painting|portrait|concept art|character|mascot|mockup|"
+            r"flyer|infographic|cover|sticker|emblem|avatar|sprite"
+        )
+        creation_verbs = r"generate|create|draw|make|design|render|paint|illustrate|produce"
+        if re.search(
+            rf"\b(?:{creation_verbs})\b.{{0,160}}\b(?:{visual_nouns})\b",
+            text,
+            re.S,
+        ):
+            return True
+        if re.search(r"\b(?:draw|paint|illustrate)\b.{0,100}", text, re.S):
+            return True
+        if re.search(
+            rf"\b(?:{visual_nouns})\b.{{0,100}}\b(?:{creation_verbs})\b",
+            text,
+            re.S,
+        ):
+            return True
+        # Some natural requests omit an explicit creation verb, e.g. "visual of BIT"
+        # or "diagram of a segment tree". Treat these as potential image-generation
+        # requests so they receive the longer timeout from the start.
+        if re.search(
+            r"\b(?:visual|image|picture|illustration|diagram|drawing|chart|infographic|"
+            r"poster|wallpaper|logo|icon|portrait)\s+(?:of|for|showing)\b",
+            text,
+        ):
+            return True
+        if re.search(
+            r"\b(?:show|give)\s+(?:me\s+)?(?:a|an)?\s*"
+            r"(?:visual|image|picture|illustration|diagram|drawing|chart)\b",
+            text,
+        ):
+            return True
+        return False
+
+    def _latest_response_locator(
+        self,
+        previous_assistant_count: Optional[int] = None,
+        previous_generic_count: Optional[int] = None,
+        previous_text: str = "",
+    ) -> Optional[Locator]:
+        """Locate the newest assistant response, including an image-only turn."""
+        try:
+            messages = self.get_assistant_messages()
+            count = messages.count()
+            if count and (
+                previous_assistant_count is None
+                or count > previous_assistant_count
+            ):
+                for index in range(count - 1, -1, -1):
+                    candidate = messages.nth(index)
+                    try:
+                        if candidate.is_visible():
+                            return candidate
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+
+        try:
+            items = self._generic_message_items()
+            if items:
+                if (
+                    previous_generic_count is not None
+                    and len(items) > previous_generic_count
+                ) or (
+                    previous_text
+                    and self._normalize_text(items[-1][1])
+                    != self._normalize_text(previous_text)
+                ):
+                    return items[-1][0]
+        except Exception:
+            pass
+
+        try:
+            messages = self.get_assistant_messages()
+            for index in range(messages.count() - 1, -1, -1):
+                candidate = messages.nth(index)
+                try:
+                    if candidate.is_visible():
+                        return candidate
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        try:
+            items = self._generic_message_items()
+            if items:
+                return items[-1][0]
+        except Exception:
+            pass
+        return None
+
+    def _response_media_signature(
+        self,
+        previous_assistant_count: Optional[int] = None,
+        previous_generic_count: Optional[int] = None,
+        previous_text: str = "",
+    ) -> Tuple[str, ...]:
+        """Describe sizeable image/media elements in the latest assistant turn."""
+        locator = self._latest_response_locator(
+            previous_assistant_count=previous_assistant_count,
+            previous_generic_count=previous_generic_count,
+            previous_text=previous_text,
+        )
+        if locator is None:
+            return ()
+        try:
+            entries = locator.evaluate(
+                r"""root => {
+                    const selector = 'img, canvas, video, [style*="background-image"]';
+                    const nodes = [];
+                    if (root.matches && root.matches(selector)) nodes.push(root);
+                    nodes.push(...root.querySelectorAll(selector));
+                    return nodes.map(node => {
+                        const rect = node.getBoundingClientRect();
+                        const style = window.getComputedStyle(node);
+                        const width = Math.max(rect.width || 0, node.naturalWidth || 0, node.videoWidth || 0);
+                        const height = Math.max(rect.height || 0, node.naturalHeight || 0, node.videoHeight || 0);
+                        const visible = rect.width > 0 && rect.height > 0 &&
+                            style.display !== 'none' && style.visibility !== 'hidden';
+                        if (!visible || width < 80 || height < 80) return null;
+                        return [
+                            (node.tagName || '').toLowerCase(),
+                            node.currentSrc || node.src || '',
+                            node.getAttribute('alt') || '',
+                            node.getAttribute('title') || '',
+                            Math.round(width), Math.round(height),
+                            node.complete === false ? 'loading' : 'ready'
+                        ].join('|');
+                    }).filter(Boolean);
+                }"""
+            )
+            return tuple(str(entry) for entry in entries or [])
+        except Exception:
+            return ()
+
+    def _generated_image_signature(self) -> Tuple[str, ...]:
+        """Return visible image-output markers created by the chat UI.
+
+        Prefer explicit generated-image markers over arbitrary <img> elements:
+        web previews and article thumbnails should not trigger an image-generated
+        notification. ChatGPT currently exposes these as elements such as
+        [data-testid="generated-image-preview"] with an accessible label.
+        """
+        selector = (
+            '[data-testid="generated-image-preview"], '
+            '[aria-label^="Generated image" i]'
+        )
+        try:
+            nodes = self.page.locator(selector)
+            count = nodes.count()
+        except Exception:
+            return ()
+
+        entries: List[str] = []
+        for index in range(count):
+            node = nodes.nth(index)
+            try:
+                result = node.evaluate(
+                    r"""node => {
+                        const image = node.matches('img') ? node : node.querySelector('img');
+                        const visual = image || node;
+                        const rect = visual.getBoundingClientRect();
+                        const style = window.getComputedStyle(visual);
+                        const visible = rect.width > 0 && rect.height > 0 &&
+                            style.display !== 'none' && style.visibility !== 'hidden';
+                        if (!visible) return null;
+
+                        const label = node.getAttribute('aria-label') ||
+                            node.getAttribute('title') ||
+                            (image && (image.getAttribute('alt') || image.getAttribute('title'))) ||
+                            'generated-image';
+                        const src = image ? (image.currentSrc || image.src || '') : '';
+                        const width = Math.round(Math.max(rect.width || 0, image?.naturalWidth || 0));
+                        const height = Math.round(Math.max(rect.height || 0, image?.naturalHeight || 0));
+                        if (width < 50 || height < 50) return null;
+
+                        const ready = !!image && image.complete && image.naturalWidth > 0;
+                        // `key` remains stable as a loading image becomes ready.
+                        const key = [label, src || 'pending', width, height].join('|');
+                        return { key, ready };
+                    }"""
+                )
+                if result and result.get('key'):
+                    state = 'ready' if result.get('ready') else 'loading'
+                    entries.append(f"{result['key']}|{state}")
+            except Exception:
+                continue
+        return tuple(entries)
+
+    @staticmethod
+    def _media_keys(signature: Tuple[str, ...]) -> set[str]:
+        """Strip the loading/ready suffix so load progress isn't a new image."""
+        return {entry.rsplit('|', 1)[0] for entry in signature}
+
     def get_latest_assistant_text(self) -> str:
         """Read the latest reply, preferring current-turn generic nodes in flight.
 
@@ -692,7 +907,21 @@ class BrowserChat:
                 continue
         return False
 
-    def _wait_for_submission(self, prompt: str, previous_user_count: int) -> bool:
+    def _wait_for_submission(
+        self,
+        prompt: str,
+        previous_user_count: int,
+        previous_text: str = "",
+        previous_assistant_count: Optional[int] = None,
+        previous_generic_count: Optional[int] = None,
+    ) -> bool:
+        """Confirm submission from the outgoing turn, composer, or new response.
+
+        Some chat UIs do not expose a user-message node or clear the composer in
+        a way our existing checks can detect. A newly appearing assistant reply
+        is also strong evidence that the click was accepted. These checks only
+        observe the page; they never click Send again.
+        """
         deadline = time.monotonic() + self.submission_timeout
         composer_clear_since: Optional[float] = None
         expected = self._normalize_text(prompt)
@@ -704,11 +933,37 @@ class BrowserChat:
             try:
                 current_count = self._user_message_count()
                 if current_count > previous_user_count:
-                    # Prefer matching the actual outgoing text, but a new user
-                    # message is still useful evidence on UIs that transform text.
+                    # Prefer matching the actual outgoing text, but retain the
+                    # count as a fallback signal for UIs that transform messages.
                     if self._prompt_is_visible_as_user_message(prompt):
                         return True
             except Exception:
+                pass
+
+            # A response can begin even when user-message discovery fails. Check
+            # against the pre-click baseline so an older answer is not enough.
+            try:
+                current_text = self.get_latest_assistant_text()
+                current_assistant_count = self._assistant_count()
+                current_generic_count = len(self._generic_message_items())
+
+                new_assistant_node = (
+                    previous_assistant_count is not None
+                    and current_assistant_count > previous_assistant_count
+                )
+                new_generic_node = (
+                    previous_generic_count is not None
+                    and current_generic_count > previous_generic_count
+                )
+                new_assistant_text = bool(
+                    current_text and current_text != previous_text
+                )
+
+                if new_assistant_node or new_generic_node or new_assistant_text:
+                    return True
+            except Exception:
+                # Keep the established submission signals available even if a
+                # provider's response DOM cannot be inspected during this poll.
                 pass
 
             composer, _score = self._find_composer_on_page(
@@ -763,13 +1018,33 @@ class BrowserChat:
         previous_text: str,
         previous_assistant_count: Optional[int] = None,
         previous_generic_count: Optional[int] = None,
+        previous_media_signature: Tuple[str, ...] = (),
     ) -> Tuple[str, str]:
-        """Wait for a new response to appear and then finish generating."""
+        """Wait for a new assistant response and return its readable text.
+
+        Explicit image-generation requests receive a longer timeout. The waiter
+        also detects an image-only assistant turn, reports it in the terminal,
+        and returns any accompanying assistant text for the CLI to display.
+        """
         start = time.monotonic()
+        timeout = (
+            self.image_generation_timeout
+            if self._active_image_generation
+            else self.response_timeout
+        )
         saw_new_response = False
         last_text = previous_text
+        last_media_signature = previous_media_signature
         stable_since: Optional[float] = None
         next_status_report = start + 10.0
+        image_output_seen = False
+        image_notice_printed = False
+
+        if self._active_image_generation:
+            print(
+                "Image-generation request detected. Waiting up to "
+                f"{timeout:g} seconds for the response and image output."
+            )
 
         print(
             "Response detector armed: "
@@ -779,12 +1054,13 @@ class BrowserChat:
 
         while True:
             state, information = self.detect_page_state()
-            if state in {"RATE_LIMITED", "AUTH_REQUIRED", "USER_ACTION_REQUIRED"}:
-                return state, information or ""
-
             current_text = self.get_latest_assistant_text()
             assistant_count = self._assistant_count()
             generic_count = len(self._generic_message_items())
+            # Search for explicit generated-image markers on every turn, not only
+            # when the prompt heuristic predicted image generation. Natural prompts
+            # like "visual of BIT" can still cause the model to generate an image.
+            current_media_signature = self._generated_image_signature()
 
             structured_response_added = (
                 previous_assistant_count is not None
@@ -794,18 +1070,78 @@ class BrowserChat:
                 previous_generic_count is not None
                 and generic_count > previous_generic_count
             )
+            new_media_response = bool(
+                self._media_keys(current_media_signature)
+                - self._media_keys(previous_media_signature)
+            ) and not image_output_seen
+            if self._active_image_generation or new_media_response or image_output_seen:
+                if new_media_response:
+                    # An actual generated-image DOM marker is stronger evidence
+                    # than prompt wording. Extend the wait even for implicit requests.
+                    self._active_image_generation = True
+                    timeout = max(timeout, self.image_generation_timeout)
+                if new_media_response or image_output_seen:
+                # get_latest_assistant_text() may fall back to an older non-empty
+                # generic message when the new assistant turn contains only an
+                # image. Once media appears, keep reading the current response
+                # container on each poll so an old answer is never reused.
+                    response_locator = self._latest_response_locator(
+                        previous_assistant_count=previous_assistant_count,
+                        previous_generic_count=previous_generic_count,
+                        previous_text=previous_text,
+                    )
+                    if response_locator is not None:
+                        current_turn_text = self._extract_element_text(response_locator)
+                        if current_turn_text and self._normalize_text(current_turn_text) != self._normalize_text(previous_text):
+                            current_text = current_turn_text
+                        elif current_text == previous_text:
+                            # Never return stale text from the preceding turn for an
+                            # image-only response that has no readable message text.
+                            current_text = ""
+
+            new_text_response = bool(current_text and current_text != previous_text)
 
             if (
                 structured_response_added
                 or generic_response_added
-                or (current_text and current_text != previous_text)
+                or new_text_response
+                or new_media_response
             ):
                 saw_new_response = True
 
-            if saw_new_response and current_text:
-                now = time.monotonic()
-                if current_text != last_text:
+            if new_media_response:
+                image_output_seen = True
+                if not image_notice_printed:
+                    print(
+                        "\n[IMAGE OUTPUT DETECTED] The model generated an image. "
+                        "It is available in the browser. Waiting for the response "
+                        "and image to finish..."
+                    )
+                    image_notice_printed = True
+
+            # Some interfaces place image previews in dialog-like overlays. Once
+            # an actual new image output is observed, don't misclassify that
+            # preview as a request for user input.
+            if state in {"RATE_LIMITED", "AUTH_REQUIRED", "USER_ACTION_REQUIRED"}:
+                if not (
+                    self._active_image_generation
+                    and image_output_seen
+                    and state == "USER_ACTION_REQUIRED"
+                ):
+                    return state, information or ""
+
+            image_media_ready = bool(current_media_signature) and all(
+                item.endswith("|ready") for item in current_media_signature
+            )
+            now = time.monotonic()
+            if saw_new_response and (current_text or image_output_seen):
+                content_changed = (
+                    current_text != last_text
+                    or current_media_signature != last_media_signature
+                )
+                if content_changed:
                     last_text = current_text
+                    last_media_signature = current_media_signature
                     stable_since = now
                 elif stable_since is None:
                     stable_since = now
@@ -814,32 +1150,57 @@ class BrowserChat:
                     stable_since is not None
                     and now - stable_since >= self.response_stability
                     and not self._is_generation_active()
+                    and (not image_output_seen or image_media_ready)
                 ):
-                    return "COMPLETED", current_text
+                    result = current_text.strip()
+                    if image_output_seen:
+                        image_note = (
+                            "[IMAGE GENERATED] An image output is available in the "
+                            "browser. Open the browser to view it."
+                        )
+                        result = f"{result}\n\n{image_note}" if result else image_note
+                    return "COMPLETED", result
             else:
                 stable_since = None
 
-            now = time.monotonic()
             if now >= next_status_report:
                 print(
                     f"[response wait: {int(now - start)}s] "
                     f"assistant_nodes={assistant_count}, "
                     f"generic_candidates={generic_count}, "
                     f"latest_text_chars={len(current_text)}, "
-                    f"generation_active={self._is_generation_active()}"
+                    f"generation_active={self._is_generation_active()}, "
+                    f"image_output_detected={image_output_seen}"
                 )
                 next_status_report = now + 10.0
 
-            if now - start >= self.response_timeout:
+            if now - start >= timeout:
                 state, information = self.detect_page_state()
-                if state is not None:
+                if state is not None and not (
+                    image_output_seen and state == "USER_ACTION_REQUIRED"
+                ):
                     return state, information or ""
                 diagnostic = self._response_diagnostic(current_text)
                 message = (
-                    "Timed out waiting for the response to finish. "
+                    f"Timed out waiting for the response to finish after {timeout:g} seconds. "
                     f"Detector diagnostics: {diagnostic}"
                 )
                 print(f"[response timeout] {message}")
+                if current_text or image_output_seen:
+                    partial = current_text.strip()
+                    if image_output_seen:
+                        note = (
+                            "[IMAGE OUTPUT DETECTED] The image may still be generating; "
+                            "check the browser."
+                        )
+                        partial = f"{partial}\n\n{note}" if partial else note
+                    # TIMEOUT_UNKNOWN is handled by the outer CLI without printing
+                    # the returned result. Display any available image-turn text
+                    # here so a long-running image operation doesn't hide it.
+                    if self._active_image_generation and partial:
+                        print("\n[PARTIAL MODEL RESPONSE BEFORE TIMEOUT]")
+                        print(partial)
+                    return "TIMEOUT_UNKNOWN", f"{partial}\n\n{message}"
                 return "TIMEOUT_UNKNOWN", message
 
             time.sleep(self.poll_interval)
@@ -861,9 +1222,11 @@ class BrowserChat:
         # existing messages; after submission, generic extraction can consistently
         # exclude the outgoing prompt rather than miscounting it as a reply.
         self._active_prompt = prompt
+        self._active_image_generation = self._is_image_generation_request(prompt)
         previous_text = self.get_latest_assistant_text()
         previous_assistant_count = self._assistant_count()
         previous_generic_count = len(self._generic_message_items())
+        previous_media_signature = self._generated_image_signature()
         previous_user_count = self._user_message_count()
 
         # STEP 1: wait for a visible editable composer.
@@ -976,7 +1339,11 @@ class BrowserChat:
             # The click may have reached the page despite a timeout. Inspect state
             # but never click a second time automatically.
             submission_confirmed = self._wait_for_submission(
-                prompt, previous_user_count
+                prompt,
+                previous_user_count,
+                previous_text,
+                previous_assistant_count,
+                previous_generic_count,
             )
             if not submission_confirmed:
                 self._active_prompt = None
@@ -988,7 +1355,11 @@ class BrowserChat:
 
         print("Verifying that the prompt was accepted...")
         if not submission_confirmed and not self._wait_for_submission(
-            prompt, previous_user_count
+            prompt,
+            previous_user_count,
+            previous_text,
+            previous_assistant_count,
+            previous_generic_count,
         ):
             self._active_prompt = None
             return (
@@ -1003,6 +1374,8 @@ class BrowserChat:
                 previous_text,
                 previous_assistant_count=previous_assistant_count,
                 previous_generic_count=previous_generic_count,
+                previous_media_signature=previous_media_signature,
             )
         finally:
             self._active_prompt = None
+            self._active_image_generation = False
