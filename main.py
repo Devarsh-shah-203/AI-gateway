@@ -316,30 +316,85 @@ def main():
             # MEMORY USE
             # --------------------------------------------------
 
-            if command == "/memory use":
+            if (
+                command == "/memory use"
+                or command.startswith("/memory use ")
+            ):
                 memory_session.use_once()
+
+                # Standalone command: arm one-time memory injection.
+                if command == "/memory use":
+                    print_activity("Memory mode: NEXT")
+                    print(
+                        "  Project memory will be included "
+                        "in the next normal prompt only."
+                    )
+                    print_memory_status(
+                        memory_session.get_status()
+                    )
+                    print()
+                    continue
+
+                # Inline command: attach memory to this question only.
+                prompt = prompt[len("/memory use"):].strip()
+                command = "__inline_prompt__"
+
                 print_activity("Memory mode: NEXT")
-                print(
-                    "  Project memory will be included "
-                    "in the next normal prompt only."
-                )
+                if edit_mode:
+                    print(
+                        "  EDIT MODE suppresses memory injection; "
+                        "one-time memory use remains pending for the next normal prompt."
+                    )
+                else:
+                    print(
+                        "  Project memory will be included in this request only."
+                    )
                 print_memory_status(
                     memory_session.get_status()
                 )
                 print()
-                continue
 
             # --------------------------------------------------
             # MEMORY ON
             # --------------------------------------------------
 
-            if command == "/memory on":
+            if (
+                command == "/memory on"
+                or command.startswith("/memory on ")
+            ):
                 memory_session.enable()
+
+                # Standalone command: enable memory for the next normal prompt.
+                if command == "/memory on":
+                    print_activity("Memory mode: ON")
+                    print(
+                        "  The current project-memory snapshot "
+                        "will be included in the next normal prompt."
+                    )
+                    print(
+                        "  It will not be resent with every prompt."
+                    )
+                    print_memory_status(
+                        memory_session.get_status()
+                    )
+                    print()
+                    continue
+
+                # Inline command: enable memory and send this question now.
+                prompt = prompt[len("/memory on"):].strip()
+                command = "__inline_prompt__"
+
                 print_activity("Memory mode: ON")
-                print(
-                    "  The current project-memory snapshot "
-                    "will be included in the next normal prompt."
-                )
+                if edit_mode:
+                    print(
+                        "  EDIT MODE suppresses memory injection; "
+                        "memory mode remains ON for the next normal prompt."
+                    )
+                else:
+                    print(
+                        "  The current project-memory snapshot "
+                        "will be included in this request."
+                    )
                 print(
                     "  It will not be resent with every prompt."
                 )
@@ -347,7 +402,6 @@ def main():
                     memory_session.get_status()
                 )
                 print()
-                continue
 
             # --------------------------------------------------
             # MEMORY OFF
@@ -370,18 +424,45 @@ def main():
             # MEMORY REFRESH
             # --------------------------------------------------
 
-            if command == "/memory refresh":
+            if (
+                command == "/memory refresh"
+                or command.startswith("/memory refresh ")
+            ):
                 memory_session.refresh()
-                print_activity("Memory refresh queued")
-                print(
-                    "  The current project-memory snapshot "
-                    "will be included in the next normal prompt."
-                )
+
+                # Command by itself: queue memory for the next prompt.
+                if command == "/memory refresh":
+                    print_activity("Memory refresh queued")
+                    print(
+                        "  The current project-memory snapshot "
+                        "will be included in the next normal prompt."
+                    )
+                    print_memory_status(
+                        memory_session.get_status()
+                    )
+                    print()
+                    continue
+
+                # Command followed by text: refresh memory and send
+                # only the remaining text as the user's actual prompt.
+                prompt = prompt[len("/memory refresh"):].strip()
+                command = "__inline_prompt__"
+
+                print_activity("Memory refresh requested")
+                if edit_mode:
+                    print(
+                        "  EDIT MODE suppresses memory injection; "
+                        "the refresh remains pending for the next normal prompt."
+                    )
+                else:
+                    print(
+                        "  The refreshed project-memory snapshot "
+                        "will be included in this request."
+                    )
                 print_memory_status(
                     memory_session.get_status()
                 )
                 print()
-                continue
 
             # --------------------------------------------------
             # SAVE MEMORY
