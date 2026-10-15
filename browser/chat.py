@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import re
 import time
+import unicodedata
 from typing import List, Optional, Tuple
 
 from playwright.sync_api import Browser, Locator, Page
@@ -109,6 +110,7 @@ class BrowserChat:
         self.poll_interval = poll_interval
         self._active_prompt: Optional[str] = None
         self._active_image_generation = False
+        self._last_prompt_verification: dict[str, object] = {}
 
         self.page = page or self._find_chat_page()
         if self.page is None:
@@ -302,21 +304,171 @@ class BrowserChat:
 
     @staticmethod
     def _normalize_text(value: str) -> str:
-        return " ".join((value or "").split())
+        """Normalize harmless DOM/text-editor whitespace differences."""
+        value = value or ""
+        value = unicodedata.normalize("NFC", value)
+        value = value.replace("\u00a0", " ")
+        # Contenteditable editors can include invisible formatting characters
+        # around pasted text. They must not cause an otherwise exact match to fail.
+        value = value.translate({
+            ord("\u200b"): None,
+            ord("\u200c"): None,
+            ord("\u200d"): None,
+            ord("\u2060"): None,
+            ord("\ufeff"): None,
+        })
+        return " ".join(value.split())
+
+    @staticmethod
+    def _scaled_prompt_timeout(
+        prompt: str,
+        base_timeout: float,
+        *,
+        minimum: float = 12.0,
+        maximum: float = 120.0,
+        reference_chars: int = 10_000,
+    ) -> float:
+        """Scale browser-operation timeouts to the amount of text being inserted.
+
+        Character count is a lightweight proxy for payload size: it includes any
+        attached project memory and file context without adding a tokenizer
+        dependency. ``base_timeout`` applies at 10,000 characters by default; small prompts
+        use a short floor and large prompts receive a bounded longer allowance.
+        """
+        size_factor = max(0.0, len(prompt)) / max(1, reference_chars)
+        return min(maximum, max(minimum, base_timeout * size_factor))
+
+    @staticmethod
+    def _contains_text_with_only_extra_characters(
+        expected: str,
+        observed: str,
+        max_extra: int = 2,
+    ) -> bool:
+        """Return True only if all expected characters occur in order in observed.
+
+        Some contenteditable implementations expose a couple of extra characters
+        in ``innerText`` compared with the text that was filled. This check allows
+        a very small number of *additional* observed characters, but never accepts
+        a candidate that is shorter than expected or that has lost/replaced any
+        expected character. It is intentionally stricter than fuzzy similarity.
+        Both inputs must already be normalized.
+        """
+        if len(observed) < len(expected):
+            return False
+        extra_budget = len(observed) - len(expected)
+        if extra_budget < 0 or extra_budget > max_extra:
+            return False
+
+        expected_index = 0
+        observed_index = 0
+        extras = 0
+        while expected_index < len(expected) and observed_index < len(observed):
+            if expected[expected_index] == observed[observed_index]:
+                expected_index += 1
+                observed_index += 1
+            else:
+                # Skip only in the observed text. Never skip any expected prompt
+                # character, because all of the requested content must be present.
+                extras += 1
+                observed_index += 1
+                if extras > max_extra:
+                    return False
+
+        extras += len(observed) - observed_index
+        return expected_index == len(expected) and extras == extra_budget and extras <= max_extra
 
     def _wait_for_prompt_in_composer(self, prompt: str, timeout: float) -> bool:
+        """Poll visible composers until they contain the complete prompt.
+
+        Do not rely only on the single highest-scoring composer: some chat UIs
+        replace or reorder contenteditable nodes while a large prompt is rendered.
+        Inspect visible candidates and compare multiple DOM text representations.
+        Exact matches are preferred. A candidate up to two characters longer is
+        accepted only if every expected character is still present in order; this
+        handles tiny editor-added artifacts without accepting truncated prompts.
+        """
         expected = self._normalize_text(prompt)
-        deadline = time.monotonic() + timeout
+        deadline = time.monotonic() + max(0.0, timeout)
+        last_visible: list[dict[str, object]] = []
 
         while time.monotonic() < deadline:
-            locator, _score = self._find_composer_on_page(
-                self.page, require_ready=False
-            )
-            if locator is not None:
-                current = self._normalize_text(self._read_composer_text(locator))
-                if current == expected:
-                    return True
-            time.sleep(self.poll_interval)
+            visible: list[dict[str, object]] = []
+            try:
+                candidates = self.page.locator(_COMPOSER_SELECTOR)
+                candidate_count = candidates.count()
+            except Exception:
+                candidate_count = 0
+                candidates = None
+
+            for index in range(candidate_count):
+                candidate = candidates.nth(index)
+                try:
+                    if not candidate.is_visible():
+                        continue
+                    values = candidate.evaluate(
+                        """el => ({
+                            tag: (el.tagName || '').toLowerCase(),
+                            value: typeof el.value === 'string' ? el.value : '',
+                            innerText: typeof el.innerText === 'string' ? el.innerText : '',
+                            textContent: typeof el.textContent === 'string' ? el.textContent : ''
+                        })"""
+                    )
+                    variants = [
+                        values.get("value", ""),
+                        values.get("innerText", ""),
+                        values.get("textContent", ""),
+                    ]
+                    normalized_variants = [self._normalize_text(v) for v in variants]
+                    visible.append({
+                        "tag": values.get("tag", "?"),
+                        "lengths": [len(v) for v in normalized_variants],
+                    })
+                    exact_match = any(value == expected for value in normalized_variants)
+                    near_match = False
+                    extra_characters = 0
+                    if not exact_match:
+                        for value in normalized_variants:
+                            if self._contains_text_with_only_extra_characters(
+                                expected, value, max_extra=2
+                            ):
+                                near_match = True
+                                extra_characters = len(value) - len(expected)
+                                break
+
+                    if exact_match or near_match:
+                        self._last_prompt_verification = {
+                            "matched": True,
+                            "verification": "exact" if exact_match else "all_expected_chars_present_with_small_editor_extras",
+                            "extra_observed_characters": extra_characters if near_match else 0,
+                            "expected_chars": len(expected),
+                            "visible_candidates": len(visible),
+                            "observed": visible,
+                        }
+                        if near_match and not exact_match:
+                            print(
+                                "Prompt verification: all expected characters are present; "
+                                f"the editor exposes {extra_characters} additional character(s)."
+                            )
+                        return True
+                except Exception:
+                    # DOM replacement during a React-style update is transient;
+                    # retry on the next poll rather than treating it as failure.
+                    continue
+
+            last_visible = visible
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                time.sleep(min(self.poll_interval, remaining))
+
+        # Keep privacy-safe diagnostics: character counts and element types only,
+        # never the prompt or attached project-memory content.
+        self._last_prompt_verification = {
+            "matched": False,
+            "expected_chars": len(expected),
+            "visible_candidates": len(last_visible),
+            "observed": last_visible,
+            "timeout_seconds": timeout,
+        }
         return False
 
     # ------------------------------------------------------------------
@@ -914,6 +1066,7 @@ class BrowserChat:
         previous_text: str = "",
         previous_assistant_count: Optional[int] = None,
         previous_generic_count: Optional[int] = None,
+        timeout: Optional[float] = None,
     ) -> bool:
         """Confirm submission from the outgoing turn, composer, or new response.
 
@@ -922,7 +1075,8 @@ class BrowserChat:
         is also strong evidence that the click was accepted. These checks only
         observe the page; they never click Send again.
         """
-        deadline = time.monotonic() + self.submission_timeout
+        effective_timeout = self.submission_timeout if timeout is None else timeout
+        deadline = time.monotonic() + effective_timeout
         composer_clear_since: Optional[float] = None
         expected = self._normalize_text(prompt)
 
@@ -1223,6 +1377,30 @@ class BrowserChat:
         # exclude the outgoing prompt rather than miscounting it as a reply.
         self._active_prompt = prompt
         self._active_image_generation = self._is_image_generation_request(prompt)
+
+        # Scale only browser interaction/verification budgets. Model response
+        # generation keeps its independent response_timeout/image_generation_timeout.
+        insertion_timeout = self._scaled_prompt_timeout(
+            prompt, self.insertion_timeout, minimum=12.0, maximum=120.0
+        )
+        send_timeout = self._scaled_prompt_timeout(
+            prompt, self.send_timeout, minimum=12.0, maximum=90.0
+        )
+        submission_timeout = self._scaled_prompt_timeout(
+            prompt, self.submission_timeout, minimum=12.0, maximum=60.0
+        )
+        click_timeout_ms = int(
+            self._scaled_prompt_timeout(
+                prompt, 10.0, minimum=10.0, maximum=60.0
+            ) * 1000
+        )
+        print(
+            "Prompt-size timeouts: "
+            f"insert/verify={insertion_timeout:.1f}s, "
+            f"send-control={send_timeout:.1f}s, "
+            f"submission-check={submission_timeout:.1f}s."
+        )
+
         previous_text = self.get_latest_assistant_text()
         previous_assistant_count = self._assistant_count()
         previous_generic_count = len(self._generic_message_items())
@@ -1245,68 +1423,103 @@ class BrowserChat:
             self._active_prompt = None
             return "SEND_ERROR", f"Could not focus the chat composer: {error}"
 
-        # STEP 3: insert once. Playwright fill handles long prompts better than
-        # simulated keystrokes and avoids waiting for per-character typing.
+        # STEP 3: insert once, then verify against one overall dynamic deadline.
+        # A Playwright fill timeout does not prove that nothing was inserted: some
+        # browser editors apply the text while their DOM is still updating. Never
+        # return early merely because the composer is temporarily non-empty.
         print("Inserting prompt...")
+        insertion_deadline = time.monotonic() + insertion_timeout
         fill_error: Optional[Exception] = None
+        # Let fill attempt the operation, but reserve most of the prompt-size-scaled
+        # budget for observing delayed UI updates and confirming the final text.
+        fill_attempt_timeout = min(
+            insertion_timeout,
+            max(5.0, min(30.0, insertion_timeout * 0.35)),
+        )
         try:
-            composer.fill(prompt, timeout=10000)
+            composer.fill(prompt, timeout=int(fill_attempt_timeout * 1000))
         except Exception as error:
             fill_error = error
 
-        inserted = self._wait_for_prompt_in_composer(
-            prompt, timeout=min(3.0, self.insertion_timeout)
-        )
+        remaining = max(0.0, insertion_deadline - time.monotonic())
+        inserted = self._wait_for_prompt_in_composer(prompt, timeout=remaining)
 
         if not inserted and fill_error is not None:
-            # A fill call can time out after the browser has already applied it.
-            # Only fall back to one keyboard insertion if the composer is still
-            # empty; never append to partial/uncertain text.
-            current_composer, _score = self._find_composer_on_page(
-                self.page, require_ready=False
-            )
-            current_text = (
-                self._read_composer_text(current_composer)
-                if current_composer is not None
+            # Recover with keyboard insertion only when every visible composer is
+            # empty. If any composer contains text, treat it as an ambiguous/ongoing
+            # insertion and do not append or reinsert anything.
+            visible_texts: List[str] = []
+            try:
+                candidates = self.page.locator(_COMPOSER_SELECTOR)
+                for index in range(candidates.count()):
+                    candidate = candidates.nth(index)
+                    try:
+                        if not candidate.is_visible():
+                            continue
+                        data = candidate.evaluate(
+                            """el => ({
+                                value: typeof el.value === 'string' ? el.value : '',
+                                innerText: typeof el.innerText === 'string' ? el.innerText : '',
+                                textContent: typeof el.textContent === 'string' ? el.textContent : ''
+                            })"""
+                        )
+                        visible_texts.extend(
+                            self._normalize_text(data.get(key, ''))
+                            for key in ('value', 'innerText', 'textContent')
+                        )
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+
+            any_nonempty = any(value for value in visible_texts)
+            remaining = max(0.0, insertion_deadline - time.monotonic())
+            if not any_nonempty and remaining > 0:
+                current_composer = self._wait_for_composer(remaining)
+                if current_composer is not None:
+                    try:
+                        current_composer.click(timeout=min(3000, max(500, int(remaining * 1000))))
+                        self.page.keyboard.insert_text(prompt)
+                    except Exception as error:
+                        self._active_prompt = None
+                        return "SEND_ERROR", f"Could not insert prompt after an empty-composer recovery: {error}"
+                    remaining = max(0.0, insertion_deadline - time.monotonic())
+                    inserted = self._wait_for_prompt_in_composer(prompt, timeout=remaining)
+
+        if not inserted:
+            self._active_prompt = None
+            diagnostic = getattr(self, "_last_prompt_verification", {})
+            observed = diagnostic.get("observed", [])
+            observed_summary = ", ".join(
+                f"{item.get('tag', '?')} lengths={item.get('lengths', [])}"
+                for item in observed
+            ) or "no visible composer text was readable"
+            fill_summary = (
+                f" Fill attempt error: {type(fill_error).__name__}: {fill_error}."
+                if fill_error is not None
                 else ""
             )
-            if current_composer is not None and not current_text.strip():
-                try:
-                    current_composer.click(timeout=3000)
-                    self.page.keyboard.insert_text(prompt)
-                except Exception as error:
-                    self._active_prompt = None
-                    return "SEND_ERROR", f"Could not insert prompt: {error}"
-            elif current_composer is None:
-                self._active_prompt = None
-                return (
-                    "SEND_ERROR",
-                    "The composer disappeared after the fill attempt; "
-                    "the prompt was not inserted again.",
-                )
-            else:
-                self._active_prompt = None
-                return (
-                    "SEND_ERROR",
-                    "Prompt insertion failed or timed out, and the composer is not empty. "
-                    "The text was not inserted again to avoid duplication.",
-                )
-
-        print("Waiting for the complete prompt to appear in the composer...")
-        if not self._wait_for_prompt_in_composer(prompt, self.insertion_timeout):
-            self._active_prompt = None
             return (
                 "SEND_ERROR",
-                "The complete prompt could not be verified in the composer. "
-                "The Send control was not clicked.",
+                "The complete prompt was not verified before the dynamic insertion deadline. "
+                f"Expected normalized characters={diagnostic.get('expected_chars', 'unknown')}; "
+                f"observed={observed_summary}. The Send control was not clicked."
+                f"{fill_summary}",
             )
 
-        print("Prompt inserted and verified.")
+        verification = getattr(self, "_last_prompt_verification", {})
+        if verification.get("verification") == "all_expected_chars_present_with_small_editor_extras":
+            print(
+                "Prompt inserted and verified; all expected content is present "
+                f"(editor exposed {verification.get('extra_observed_characters', 0)} additional character(s))."
+            )
+        else:
+            print("Prompt inserted and verified.")
 
         # STEP 4: keep searching until a related Send/submit control is visible
         # and enabled. Its label or test ID is not required.
         print("Waiting for the Send control to become available...")
-        send_deadline = time.monotonic() + self.send_timeout
+        send_deadline = time.monotonic() + send_timeout
         send_button: Optional[Locator] = None
 
         while time.monotonic() < send_deadline:
@@ -1334,7 +1547,7 @@ class BrowserChat:
         print("Submitting prompt...")
         submission_confirmed = False
         try:
-            send_button.click(timeout=10000)
+            send_button.click(timeout=click_timeout_ms)
         except Exception as error:
             # The click may have reached the page despite a timeout. Inspect state
             # but never click a second time automatically.
@@ -1344,6 +1557,7 @@ class BrowserChat:
                 previous_text,
                 previous_assistant_count,
                 previous_generic_count,
+                timeout=submission_timeout,
             )
             if not submission_confirmed:
                 self._active_prompt = None
@@ -1360,6 +1574,7 @@ class BrowserChat:
             previous_text,
             previous_assistant_count,
             previous_generic_count,
+            timeout=submission_timeout,
         ):
             self._active_prompt = None
             return (
