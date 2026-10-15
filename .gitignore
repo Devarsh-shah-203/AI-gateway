@@ -18,3 +18,8 @@ chrome-data/
 # OS
 .DS_Store
 Thumbs.db
+
+.ai
+.ai-gateway
+tests/
+test.py
