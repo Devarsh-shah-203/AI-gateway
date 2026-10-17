@@ -1,4 +1,4 @@
-AI Gateway
+#AI Gateway
 
 A terminal-first way to work with browser-based AI on your own codebase.
 
