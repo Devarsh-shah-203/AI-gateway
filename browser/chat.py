@@ -991,8 +991,16 @@ class BrowserChat:
         return None, None
 
     def _is_generation_active(self) -> bool:
-        """Look for generic busy/stop signals before treating stable text as final."""
+        """Detect streaming using explicit stop controls and generic busy signals.
+
+        Do not infer completion merely because the response text has stopped
+        changing: streaming can pause briefly between chunks. In particular,
+        some interfaces expose an icon-only stop control whose only useful marker
+        is a test ID such as ``stop-button`` rather than visible button text.
+        """
         try:
+            # Inspect visible controls first. Include common stop/cancel markers
+            # from accessible names, titles, test IDs, and nested SVG labels.
             controls = self.page.locator(_BUTTON_SELECTOR)
             for index in range(controls.count()):
                 control = controls.nth(index)
@@ -1004,27 +1012,59 @@ class BrowserChat:
                             el.innerText || '',
                             el.getAttribute('aria-label') || '',
                             el.getAttribute('title') || '',
-                            el.getAttribute('data-testid') || ''
+                            el.getAttribute('data-testid') || '',
+                            el.getAttribute('data-state') || '',
+                            ...Array.from(el.querySelectorAll('[aria-label], [title], [data-testid]'))
+                                .flatMap(n => [
+                                    n.getAttribute('aria-label') || '',
+                                    n.getAttribute('title') || '',
+                                    n.getAttribute('data-testid') || ''
+                                ])
                         ].join(' ').toLowerCase().trim()"""
                     )
                     if re.search(
-                        r"\b(stop generating|stop generation|stop response|stop streaming|cancel generation|interrupt response)\b",
+                        r"\b(stop|cancel|interrupt)(?:[-_ ](?:generating|generation|response|streaming))?\b",
                         label,
-                    ) or label == "stop":
+                    ):
                         return True
                 except Exception:
                     continue
 
+            # Busy/streaming attributes may be on the response container rather
+            # than on a button. Check visible nodes, not hidden stale elements.
             busy = self.page.locator(
                 '[aria-busy="true"]:visible, '
                 '[data-streaming="true"]:visible, '
-                '[data-loading="true"]:visible'
+                '[data-loading="true"]:visible, '
+                '[data-is-streaming="true"]:visible, '
+                '[data-testid*="streaming" i]:visible, '
+                '[data-testid*="generating" i]:visible'
             )
             if busy.count() > 0:
                 return True
         except Exception:
             pass
         return False
+
+    def _send_control_available(self) -> Optional[bool]:
+        """Return whether a usable submit control is present, or None if unknown.
+
+        This is supplementary completion evidence only. Providers vary, and some
+        keep Send visible during generation, so this signal must never override an
+        explicit stop/busy signal or be required on interfaces with unusual DOMs.
+        """
+        composer, _score = self._find_composer_on_page(self.page, require_ready=False)
+        if composer is None:
+            return None
+        button, enabled = self._find_send_button(composer)
+        if button is None:
+            return None
+        try:
+            if not button.is_visible():
+                return False
+        except Exception:
+            return None
+        return bool(enabled)
 
     # ------------------------------------------------------------------
     # SUBMISSION VERIFICATION
@@ -1300,10 +1340,17 @@ class BrowserChat:
                 elif stable_since is None:
                     stable_since = now
 
+                generation_active = self._is_generation_active()
+                send_control_available = self._send_control_available()
+                # A known-missing/disabled Send control is supplementary evidence
+                # that the UI may still be processing. Unknown controls do not block
+                # completion on providers with nonstandard composer layouts.
+                submit_ui_not_ready = send_control_available is False
                 if (
                     stable_since is not None
                     and now - stable_since >= self.response_stability
-                    and not self._is_generation_active()
+                    and not generation_active
+                    and not submit_ui_not_ready
                     and (not image_output_seen or image_media_ready)
                 ):
                     result = current_text.strip()
@@ -1324,6 +1371,7 @@ class BrowserChat:
                     f"generic_candidates={generic_count}, "
                     f"latest_text_chars={len(current_text)}, "
                     f"generation_active={self._is_generation_active()}, "
+                    f"send_control_available={self._send_control_available()}, "
                     f"image_output_detected={image_output_seen}"
                 )
                 next_status_report = now + 10.0
