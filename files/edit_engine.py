@@ -1,9 +1,22 @@
 from files.edit_parser import FileEdit
 from files.edit_validator import ValidatedEdit
+from files.structured_edit import StructuredEditAdapter
 
 
 class EditEngine:
-    """Apply validated text edits while protecting line boundaries."""
+    """Apply text edits or dispatch a structured-document edit batch.
+
+    Text-file operations continue to use ``apply``. Structured documents use
+    the same engine/workflow through a registered format adapter, allowing the
+    parser, validator, diff review, and approval stages to remain shared.
+    """
+
+    def __init__(self, structured_edit_adapter: StructuredEditAdapter | None = None):
+        self.structured_edit_adapter = structured_edit_adapter or StructuredEditAdapter()
+
+    def apply_structured_batch(self, path, original_content: str, edits) -> str:
+        """Dispatch a batch to the registered structured-document adapter."""
+        return self.structured_edit_adapter.apply_batch(path, original_content, edits)
 
     def apply(self, validated_edit: ValidatedEdit, original_content: str) -> str:
         edit = validated_edit.edit
